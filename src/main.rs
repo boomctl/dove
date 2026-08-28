@@ -30,12 +30,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Provision the share bucket in your AWS account — private, all public
-    /// access blocked, objects auto-delete on a lifecycle rule.
+    /// Provision the share bucket in your AWS account. Just `dove provision
+    /// simple` — it asks which AWS profile, and derives the rest.
     Provision {
-        /// The S3 bucket to create (must be globally unique).
+        /// Which tier to stand up: `simple` today (`full` is coming).
+        #[arg(value_enum)]
+        tier: provision::Tier,
+        /// Override the derived bucket name (default: `dove-shares-<account-id>`).
         #[arg(long)]
-        bucket: String,
+        bucket: Option<String>,
         #[arg(long, default_value = "us-east-1")]
         region: String,
         /// AWS profile to use; omit to pick interactively.
@@ -67,11 +70,13 @@ enum Command {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Provision {
+            tier,
             bucket,
             region,
             profile,
             expire_days,
         } => provision::run(&provision::ProvisionArgs {
+            tier,
             bucket,
             region,
             profile,

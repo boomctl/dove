@@ -10,38 +10,62 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::io::Write;
 use std::process::Command;
 
+/// Which tier to stand up. `full` is designed but not built yet.
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum Tier {
+    /// Just a bucket + auto-expiry: presigned links, ≤7 days, no servers.
+    Simple,
+    /// Encrypted, download-limited, optional custom domain. (Not built yet.)
+    Full,
+}
+
 pub struct ProvisionArgs {
-    pub bucket: String,
+    pub tier: Tier,
+    /// Override the derived bucket name (default `dove-shares-<account-id>`).
+    pub bucket: Option<String>,
     pub region: String,
     pub profile: Option<String>,
     pub expire_days: u32,
 }
 
 pub fn run(args: &ProvisionArgs) -> Result<()> {
+    if matches!(args.tier, Tier::Full) {
+        bail!(
+            "the full tier (encryption, download limits, custom domain) isn't built yet — \
+             see https://dove.sh. Use `dove provision simple` for now."
+        );
+    }
     if !have_aws() {
         bail!("the AWS CLI (`aws`) is required for provisioning — https://aws.amazon.com/cli/");
     }
+
+    // The only thing dove asks: which profile. Everything else is derived.
     let profile = match &args.profile {
         Some(p) => Some(p.clone()),
         None => choose_profile()?,
     };
-
-    // Confirm which account we're about to create a bucket in.
     let (account, arn) = caller_identity(profile.as_deref()).with_context(|| {
         format!(
             "resolving the AWS identity for {} — is it logged in (e.g. `aws sso login`)?",
             profile.as_deref().unwrap_or("the default profile")
         )
     })?;
-    println!("About to provision in AWS account {account}");
+
+    // Derive a unique bucket from the account id, unless overridden.
+    let bucket = args
+        .bucket
+        .clone()
+        .unwrap_or_else(|| format!("dove-shares-{account}"));
+
+    println!("About to provision the simple tier in AWS account {account}");
     println!("  identity: {arn}");
-    println!("  bucket:   {} ({})", args.bucket, args.region);
+    println!("  bucket:   {bucket} ({})", args.region);
     if !confirm("Proceed?")? {
         bail!("aborted");
     }
 
     // 1. Create the bucket. us-east-1 must NOT get a LocationConstraint.
-    let mut create = vec!["s3api", "create-bucket", "--bucket", &args.bucket];
+    let mut create = vec!["s3api", "create-bucket", "--bucket", &bucket];
     let lc = format!("LocationConstraint={}", args.region);
     if args.region != "us-east-1" {
         create.push("--region");
@@ -58,7 +82,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
             "s3api",
             "put-public-access-block",
             "--bucket",
-            &args.bucket,
+            &bucket,
             "--public-access-block-configuration",
             PUBLIC_ACCESS_BLOCK,
         ],
@@ -73,7 +97,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
             "s3api",
             "put-bucket-lifecycle-configuration",
             "--bucket",
-            &args.bucket,
+            &bucket,
             "--lifecycle-configuration",
             &lifecycle,
         ],
@@ -81,7 +105,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
     )?;
 
     Config {
-        bucket: args.bucket.clone(),
+        bucket,
         region: args.region.clone(),
         profile,
         endpoint: None,
