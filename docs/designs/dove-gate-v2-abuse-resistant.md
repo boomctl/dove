@@ -155,6 +155,14 @@ cost real money, and the survivors are a bounded, metered set.
   capped rate*, not an open-ended bill. This is the one control that turns
   "unbounded surprise" into "bounded, and I get told" — **it ships on by default;
   a gate handed to the public should never exist without it.**
+- **Log discipline is a cost control, not just hygiene.** Under a flood,
+  CloudWatch Logs ingestion ($0.50/GB) scales with invocations and can rival the
+  compute bill (a per-request stack trace makes it far worse). So the hot path
+  logs **nothing** — MAC-rejects, throttles, and normal serves are silent; only
+  genuine unexpected errors log, minimally. Retention is set at provision (§7 bans
+  infinite retention). Reject/flood visibility comes from **free default metrics**,
+  not per-request logs. The breaker doubles as the backstop: killing the gate shuts
+  off the log firehose too.
 - **WAF** (per-IP rate rules, bot control) is the heavyweight opt-in (~$5/mo +
   $0.60/M) for users who expect to be targeted. Off by default.
 
@@ -192,7 +200,61 @@ A per-gate 32-byte random secret, generated once at provision.
 
 ---
 
-## 7. BYOA articulation — state it, probe it, name the gap
+## 7. Cost floor — $0 to operate
+
+The target: **free to keep provisioned, free to run lightly.** Outside S3 egress on
+actual downloads (unavoidable, and the user's regardless of architecture), an idle
+or lightly-used gate costs approximately nothing. One rule makes this true:
+**provision nothing always-on.** Every component is either perpetual-free-tier or
+pay-per-use with no hourly/fixed charge.
+
+**Standing cost of an idle instance:**
+
+| Component | Fixed cost at idle | Why |
+|---|---|---|
+| S3 (bucket, page, ciphertext) | $0 | pay per storage/request; tiny |
+| DynamoDB (on-demand) | $0 | no provisioned capacity = no hourly charge |
+| Lambda (gate) | $0 | perpetual free tier (1M req + 400k GB-s/mo) |
+| API Gateway (HTTP API) | $0 | no hourly charge; $1/M requests only |
+| CloudFront | $0 | perpetual free tier (1TB + 10M req/mo) |
+| CloudWatch alarm (breaker) | $0 | within the 10-alarm perpetual free tier |
+| CloudWatch Logs | $0 | 5GB/mo free, with retention set (§4, §6) |
+| SNS (breaker fan-out) | $0 | 1M publishes free |
+| ACM certificate | $0 | public certs are free |
+| SSM SecureString (standard) | $0 | standard params + aws-managed KMS are free |
+| DNS | $0 | Cloudflare, not a Route 53 hosted zone |
+
+At light use, requests fall inside those tiers or cost pennies; even after the
+12-month tiers lapse, a few hundred `/meta` + `/dl` a month is fractions of a cent.
+The only two costs not covered by a *perpetual* free tier — API Gateway ($1/M after
+12 months) and CloudWatch alarms beyond 10 ($0.10 each) — are effectively $0 at
+light use, and the caching + MAC-reject design (§3, §4) drives the API-Gateway
+per-request count toward zero anyway.
+
+### Banned components (anything with an always-on charge)
+
+"Near-free" is a rule about what may be provisioned. The implementation MUST NOT
+introduce any always-on resource; each of these has a cheaper serverless
+substitute already in the design:
+
+| Banned | Fixed cost it adds | Use instead |
+|---|---|---|
+| **ALB** in front of Lambda | ~$16/mo just to exist | API Gateway HTTP API |
+| **Provisioned-capacity DynamoDB** | hourly RCU/WCU | on-demand (PAY_PER_REQUEST) |
+| **Route 53 hosted zone** | $0.50/mo | Cloudflare (or the user's existing DNS) |
+| **Customer-managed KMS key** | $1/mo | aws-managed key for SSM/S3 |
+| **Advanced SSM parameters** | $0.05 each/mo | standard SecureString |
+| **NAT Gateway / VPC endpoints** | ~$32/mo+ | none — the gate needs no VPC |
+| **Infinite log retention** | storage creep past the 5GB free tier | 14-day retention set at provision |
+| **Provisioned-concurrency Lambda** | hourly per unit | on-demand (cold start is fine here) |
+
+The promise this earns: **free to keep provisioned, free to run lightly; you pay
+S3 egress only when someone actually downloads, and abuse is capped so it stays
+that way.**
+
+---
+
+## 8. BYOA articulation — state it, probe it, name the gap
 
 dove runs in someone else's account; it owes them a clear contract and an honest
 verdict, not a link that silently 403s.
@@ -216,7 +278,7 @@ verdict, not a link that silently 403s.
 
 ---
 
-## 8. Migration from v1
+## 9. Migration from v1
 
 The v1 full tier (Lambda Function URL, optional CloudFront-OAC) is replaced, not
 extended. dove is unreleased, so there is no link/format compatibility to keep;
@@ -235,7 +297,7 @@ v2 is the full tier. Concretely:
 
 ---
 
-## 9. Open decisions for review
+## 10. Open decisions for review
 
 1. **Breaker default threshold.** Conservative (protects the naive user, but could
    dark a legitimately-popular share) vs generous (fewer false trips, bigger
@@ -253,7 +315,7 @@ v2 is the full tier. Concretely:
 
 ---
 
-## 10. Why this is defensible
+## 11. Why this is defensible
 
 The through-line: the account restriction and the abuse model pushed us to the
 same architecture. Public things get abused — so we made the only thing an
