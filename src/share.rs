@@ -9,27 +9,38 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn run(path: &Path, expires: &str, encrypt: bool) -> Result<()> {
+pub fn run(path: &Path, expires: &str, encrypt: bool, downloads: Option<u32>) -> Result<()> {
     let ttl = dur::parse(expires)?;
-    if !dur::within_presign_limit(ttl) {
-        bail!(
-            "--expires {expires} is over the 7-day limit for the simple tier's presigned links.\n\
-             Use 7d or less. Longer-lived shares (and download limits) are the full tier — see \
-             https://dove.sh."
-        );
-    }
     // Fail fast if not provisioned, before we spend time zipping/encrypting.
     let cfg = Config::load()?;
     let store = Store::new(&cfg)?;
-
-    // A file uploads as-is; a directory is zipped to a temp file first.
     let (source, name, zip_temp) = prepare_upload(path)?;
 
-    // With --encrypt, encrypt to a temp ciphertext and upload that; the content
-    // key rides the link's #fragment and never touches a server.
+    if cfg.is_full() {
+        return share_full(
+            &cfg,
+            &store,
+            &source,
+            &name,
+            ttl,
+            downloads.unwrap_or(100),
+            zip_temp,
+        );
+    }
+
+    // Simple tier: presigned links, capped at 7 days, optional --encrypt.
+    if !dur::within_presign_limit(ttl) {
+        bail!(
+            "--expires {expires} is over the 7-day limit for the simple tier's presigned links.\n\
+             Use 7d or less. Longer-lived shares and download limits are the full tier — \
+             provision it with `dove provision full`."
+        );
+    }
     let (upload, ct_temp, fragment) = if encrypt {
         let content_key = crypto::gen_key();
         let ct = temp_zip_path();
@@ -51,7 +62,6 @@ pub fn run(path: &Path, expires: &str, encrypt: bool) -> Result<()> {
     let size = std::fs::metadata(&upload)?.len();
     let bar = ui::Progress::new("uploading", size);
     let uploaded = store.put_file(&object_key, &upload, |done| bar.set(done));
-    // Clean temps whether the upload succeeded or not.
     for t in [zip_temp, ct_temp].into_iter().flatten() {
         let _ = std::fs::remove_file(t);
     }
@@ -66,6 +76,153 @@ pub fn run(path: &Path, expires: &str, encrypt: bool) -> Result<()> {
     }
     ui::share_result(&url, &format!("expires in {}", dur::human_long(ttl)));
     Ok(())
+}
+
+/// Full tier: always encrypt, register a download policy in DynamoDB, and hand
+/// out a gate link (`<gate>/d/<id>/<name>#key`) instead of a raw presigned URL.
+/// The gate enforces the budget; the key still rides the fragment.
+fn share_full(
+    cfg: &Config,
+    store: &Store,
+    source: &Path,
+    name: &str,
+    ttl: Duration,
+    downloads: u32,
+    zip_temp: Option<PathBuf>,
+) -> Result<()> {
+    let content_key = crypto::gen_key();
+    let ct = temp_zip_path();
+    ui::step("encrypting", || {
+        let reader = File::open(source)?;
+        let writer = BufWriter::new(File::create(&ct)?);
+        crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
+    })?;
+
+    let share_id = random_id();
+    let object_key = format!("{share_id}/{name}");
+    let size = std::fs::metadata(&ct)?.len();
+    let bar = ui::Progress::new("uploading", size);
+    let uploaded = store.put_file(&object_key, &ct, |done| bar.set(done));
+    for t in [zip_temp, Some(ct)].into_iter().flatten() {
+        let _ = std::fs::remove_file(t);
+    }
+    uploaded?;
+    bar.finish();
+    ui::status("uploaded", &ui::human_size(size));
+
+    let expires_at = now_epoch() + ttl.as_secs();
+    ui::step("registering policy", || {
+        put_policy_item(cfg, &share_id, &object_key, downloads, expires_at)
+    })?;
+
+    let gate = cfg
+        .gate_url
+        .as_ref()
+        .ok_or_else(|| anyhow!("no gate URL in config"))?;
+    let url = format!(
+        "{gate}/d/{share_id}/{}#{}",
+        percent_encode(name),
+        crypto::key_to_fragment(&content_key)
+    );
+    let plural = if downloads == 1 { "" } else { "s" };
+    ui::share_result(
+        &url,
+        &format!(
+            "expires in {} · {downloads} download{plural}",
+            dur::human_long(ttl)
+        ),
+    );
+    Ok(())
+}
+
+/// Write the share's policy row to DynamoDB via the AWS CLI (operator profile).
+fn put_policy_item(
+    cfg: &Config,
+    id: &str,
+    s3_key: &str,
+    downloads: u32,
+    expires_at: u64,
+) -> Result<()> {
+    let table = cfg
+        .table
+        .as_ref()
+        .ok_or_else(|| anyhow!("no table in config"))?;
+    let item = serde_json::json!({
+        "id": {"S": id},
+        "s3_key": {"S": s3_key},
+        "downloads_remaining": {"N": downloads.to_string()},
+        "expires_at": {"N": expires_at.to_string()},
+        "created_at": {"N": now_epoch().to_string()},
+    })
+    .to_string();
+    let mut cmd = Command::new("aws");
+    if let Some(p) = &cfg.profile {
+        cmd.args(["--profile", p]);
+    }
+    cmd.args([
+        "dynamodb",
+        "put-item",
+        "--table-name",
+        table,
+        "--item",
+        &item,
+    ]);
+    let out = cmd.output().context("running aws dynamodb put-item")?;
+    if !out.status.success() {
+        bail!(
+            "registering the share policy failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A 16-hex-char share id — the gate access token in the URL. Unguessable, so a
+/// share's download budget can't be exhausted by guessing ids.
+fn random_id() -> String {
+    let mut b = [0u8; 8];
+    getrandom::getrandom(&mut b).expect("OS RNG unavailable");
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Percent-encode a filename for a URL path segment (`dove get` decodes it).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod full_tests {
+    use super::*;
+
+    #[test]
+    fn random_id_is_16_hex_and_unique() {
+        let a = random_id();
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, random_id());
+    }
+
+    #[test]
+    fn percent_encode_escapes_spaces_and_specials() {
+        assert_eq!(percent_encode("q3 report.pdf"), "q3%20report.pdf");
+        assert_eq!(percent_encode("a+b&c"), "a%2Bb%26c");
+        assert_eq!(percent_encode("plain.txt"), "plain.txt");
+    }
 }
 
 /// Resolve what to upload and under what name: a file as-is, or a directory

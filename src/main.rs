@@ -62,9 +62,13 @@ enum Command {
         expires: String,
         /// Encrypt end-to-end: the file is encrypted before upload and the key
         /// rides the link's `#fragment`, never sent to a server. Fetch with
-        /// `dove get`.
+        /// `dove get`. (Always on in the full tier.)
         #[arg(long)]
         encrypt: bool,
+        /// Full tier only: how many times the link may be downloaded before it's
+        /// spent. Omit for a generous default.
+        #[arg(long)]
+        downloads: Option<u32>,
     },
     /// Fetch and decrypt an encrypted dove share link (key rides the #fragment).
     Get {
@@ -104,7 +108,8 @@ fn main() -> Result<()> {
             file,
             expires,
             encrypt,
-        } => share::run(&file, &expires, encrypt),
+            downloads,
+        } => share::run(&file, &expires, encrypt, downloads),
         Command::Get { url, out } => get::run(&url, out.as_deref()),
         Command::Ls => share::list(),
         Command::Revoke { id } => share::revoke(&id),
