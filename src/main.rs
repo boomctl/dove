@@ -10,6 +10,7 @@ mod config;
 mod duration;
 mod provision;
 mod s3;
+mod secrets;
 mod share;
 mod ui;
 

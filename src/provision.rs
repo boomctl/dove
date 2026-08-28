@@ -1,9 +1,10 @@
 //! `dove provision` — stand up the simple-tier share bucket from your machine,
 //! using the `aws` CLI so it rides your existing credentials/SSO. It creates a
 //! private bucket (all public access blocked) with a lifecycle rule that
-//! auto-deletes objects after a ceiling of days, then writes `config.toml`.
-//! No IAM user and no host: the simple tier signs share links with your own
-//! credentials.
+//! auto-deletes objects after a ceiling of days, mints a **least-privilege IAM
+//! user** scoped to just this bucket, and stores that user's key so `share`
+//! signs with it — never your full account credentials, and with a long-term
+//! key so presigned links get their full requested lifetime.
 
 use crate::config::Config;
 use crate::ui;
@@ -114,6 +115,67 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         )
     })?;
 
+    // 4. A least-privilege IAM user dove signs share links with — so links
+    //    aren't signed with your full account creds, and (crucially) their
+    //    expiry isn't capped by an SSO session's lifetime. Same name as the
+    //    bucket, different namespace.
+    let iam_user = bucket.clone();
+    ui::step("scoped IAM user", || {
+        aws_ok(
+            profile.as_deref(),
+            &["iam", "create-user", "--user-name", &iam_user],
+            &["EntityAlreadyExists"],
+        )
+    })?;
+    ui::step("least-privilege policy", || {
+        let policy = share_policy(&bucket);
+        aws_ok(
+            profile.as_deref(),
+            &[
+                "iam",
+                "put-user-policy",
+                "--user-name",
+                &iam_user,
+                "--policy-name",
+                "dove-share",
+                "--policy-document",
+                &policy,
+            ],
+            &[],
+        )
+    })?;
+    // Mint a key only if we don't already have one — a re-provision reuses it
+    // (an IAM user can hold at most two keys; don't orphan the old one).
+    if crate::secrets::Secrets::exists() {
+        ui::step("access key (reusing)", || Ok(()))?;
+    } else {
+        ui::step("minting access key", || {
+            let out = aws(
+                profile.as_deref(),
+                &[
+                    "iam",
+                    "create-access-key",
+                    "--user-name",
+                    &iam_user,
+                    "--output",
+                    "json",
+                ],
+            )?;
+            if !out.status.success() {
+                bail!(
+                    "creating access key: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            let (id, secret) = parse_access_key(&out.stdout)?;
+            crate::secrets::Secrets {
+                access_key_id: id,
+                secret_access_key: secret,
+            }
+            .save()
+        })?;
+    }
+
     Config {
         bucket,
         region: args.region.clone(),
@@ -141,6 +203,32 @@ pub fn lifecycle_config(days: u32) -> String {
     format!(
         r#"{{"Rules":[{{"ID":"dove-expire","Status":"Enabled","Filter":{{}},"Expiration":{{"Days":{days}}}}}]}}"#
     )
+}
+
+/// The least-privilege IAM policy dove's signing user gets: read/write/delete
+/// objects and list — scoped to this one bucket, nothing else in the account.
+pub fn share_policy(bucket: &str) -> String {
+    format!(
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:PutObject","s3:GetObject","s3:DeleteObject"],"Resource":"arn:aws:s3:::{bucket}/*"}},{{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":"arn:aws:s3:::{bucket}"}}]}}"#
+    )
+}
+
+/// Extract `(AccessKeyId, SecretAccessKey)` from `iam create-access-key` JSON.
+pub fn parse_access_key(json_bytes: &[u8]) -> Result<(String, String)> {
+    let json: serde_json::Value =
+        serde_json::from_slice(json_bytes).context("parsing create-access-key output")?;
+    let key = json
+        .get("AccessKey")
+        .ok_or_else(|| anyhow!("create-access-key output missing AccessKey"))?;
+    let id = key
+        .get("AccessKeyId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("create-access-key output missing AccessKeyId"))?;
+    let secret = key
+        .get("SecretAccessKey")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("create-access-key output missing SecretAccessKey"))?;
+    Ok((id.to_string(), secret.to_string()))
 }
 
 fn have_aws() -> bool {
@@ -251,6 +339,28 @@ mod tests {
         assert!(lc.contains("\"Days\":7"));
         assert!(lc.contains("\"Status\":\"Enabled\""));
         assert!(lc.contains("\"Expiration\""));
+    }
+
+    #[test]
+    fn share_policy_is_scoped_to_the_one_bucket() {
+        let p = share_policy("dove-shares-123");
+        assert!(p.contains("s3:PutObject"));
+        assert!(p.contains("s3:GetObject"));
+        assert!(p.contains("s3:DeleteObject"));
+        assert!(p.contains("s3:ListBucket"));
+        assert!(p.contains("arn:aws:s3:::dove-shares-123/*"));
+        assert!(p.contains("arn:aws:s3:::dove-shares-123\""));
+        // No account-wide grant.
+        assert!(!p.contains("\"Resource\":\"*\""));
+    }
+
+    #[test]
+    fn parse_access_key_extracts_id_and_secret() {
+        let json =
+            br#"{"AccessKey":{"AccessKeyId":"AKIA1","SecretAccessKey":"shh","Status":"Active"}}"#;
+        let (id, secret) = parse_access_key(json).unwrap();
+        assert_eq!(id, "AKIA1");
+        assert_eq!(secret, "shh");
     }
 
     #[test]

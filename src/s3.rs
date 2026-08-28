@@ -42,7 +42,11 @@ impl Store {
             cfg.region.clone(),
         )
         .map_err(|e| anyhow!("bucket config: {e}"))?;
-        let creds = resolve_credentials(cfg.profile.as_deref())?;
+        // Sign with dove's scoped IAM key (minted by `provision`), never your
+        // full account creds. It's a long-term key, so presigned URLs get the
+        // full requested lifetime (SSO/temp creds would cap it short).
+        let secrets = crate::secrets::Secrets::load()?;
+        let creds = Credentials::new(secrets.access_key_id, secrets.secret_access_key);
         Ok(Self { bucket, creds })
     }
 
@@ -155,45 +159,6 @@ impl<R: Read, F: FnMut(u64)> Read for ProgressReader<R, F> {
 /// credentials, without resolving anything from the environment.
 fn sign_get(bucket: &Bucket, creds: &Credentials, key: &str, ttl: Duration) -> String {
     bucket.get_object(Some(creds), key).sign(ttl).to_string()
-}
-
-/// Resolve AWS credentials from the configured profile via the AWS CLI
-/// (`aws configure export-credentials`), so SSO/role/env all work the way the
-/// operator's shell already does. Returns temporary creds (with a session
-/// token) when the profile provides them.
-fn resolve_credentials(profile: Option<&str>) -> Result<Credentials> {
-    let mut cmd = std::process::Command::new("aws");
-    cmd.args(["configure", "export-credentials", "--format", "process"]);
-    if let Some(p) = profile {
-        cmd.args(["--profile", p]);
-    }
-    let out = cmd
-        .output()
-        .context("running `aws configure export-credentials` (is the AWS CLI installed?)")?;
-    if !out.status.success() {
-        bail!(
-            "couldn't resolve AWS credentials: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing AWS credentials JSON")?;
-    let access = v["AccessKeyId"]
-        .as_str()
-        .ok_or_else(|| anyhow!("no AccessKeyId in AWS credentials"))?
-        .to_string();
-    let secret = v["SecretAccessKey"]
-        .as_str()
-        .ok_or_else(|| anyhow!("no SecretAccessKey in AWS credentials"))?
-        .to_string();
-    match v["SessionToken"].as_str().filter(|t| !t.is_empty()) {
-        Some(token) => Ok(Credentials::new_with_token(
-            access,
-            secret,
-            token.to_string(),
-        )),
-        None => Ok(Credentials::new(access, secret)),
-    }
 }
 
 /// Format a ureq error WITHOUT leaking the signed request URL (which carries
