@@ -18,6 +18,7 @@ path = "src/main.rs"
 # Added as the implementation lands, per docs/designs/dove-v1.md.
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

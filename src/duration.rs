@@ -61,9 +61,32 @@ pub fn human(d: Duration) -> String {
     }
 }
 
+/// A friendly, spelled-out duration for status lines: `2 days`, `1 day`,
+/// `12 hours`. Uses the largest unit that divides evenly.
+pub fn human_long(d: Duration) -> String {
+    let s = d.as_secs();
+    let (n, unit) = if s.is_multiple_of(86_400) {
+        (s / 86_400, "day")
+    } else if s.is_multiple_of(3_600) {
+        (s / 3_600, "hour")
+    } else if s.is_multiple_of(60) {
+        (s / 60, "minute")
+    } else {
+        (s, "second")
+    };
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_long_spells_it_out() {
+        assert_eq!(human_long(parse("2d").unwrap()), "2 days");
+        assert_eq!(human_long(parse("1d").unwrap()), "1 day");
+        assert_eq!(human_long(parse("12h").unwrap()), "12 hours");
+    }
 
     #[test]
     fn parses_each_unit() {

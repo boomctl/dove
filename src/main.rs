@@ -10,9 +10,12 @@ mod config;
 mod duration;
 mod provision;
 mod s3;
+mod share;
+mod ui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -42,6 +45,14 @@ enum Command {
         #[arg(long, default_value_t = 7)]
         expire_days: u32,
     },
+    /// Share a file: upload it and print a presigned link that auto-expires.
+    Share {
+        /// The file to share.
+        file: PathBuf,
+        /// How long the link stays valid (≤ 7d): `3d`, `12h`, `30m`.
+        #[arg(long, default_value = "3d")]
+        expires: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -57,5 +68,6 @@ fn main() -> Result<()> {
             profile,
             expire_days,
         }),
+        Command::Share { file, expires } => share::run(&file, &expires),
     }
 }

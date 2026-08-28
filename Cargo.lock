@@ -209,6 +209,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "getrandom",
  "rusty-s3",
  "serde",
  "serde_json",

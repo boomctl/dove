@@ -10,6 +10,9 @@ use crate::config::Config;
 use anyhow::{anyhow, bail, Context, Result};
 use rusty_s3::actions::ListObjectsV2;
 use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 /// TTL for internally-signed operation URLs (put/delete/list). Short — these
@@ -106,6 +109,46 @@ impl Store {
         }
         Ok(keys)
     }
+
+    /// Stream a file to `key`, calling `on_progress(bytes_uploaded)` as it goes.
+    /// Content-Length is set from the file size, so S3 gets a single sized PUT
+    /// and the body streams rather than buffering the whole file in memory.
+    /// Returns the total byte count.
+    pub fn put_file(&self, key: &str, path: &Path, on_progress: impl FnMut(u64)) -> Result<u64> {
+        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let total = file.metadata()?.len();
+        let url = self.bucket.put_object(Some(&self.creds), key).sign(OP_TTL);
+        let reader = ProgressReader {
+            inner: file,
+            uploaded: 0,
+            on_progress,
+        };
+        let resp = ureq::put(url.as_str())
+            .set("Content-Length", &total.to_string())
+            .send(reader)
+            .map_err(|e| anyhow!("PutObject {key} failed: {}", s3_err(e)))?;
+        if resp.status() >= 300 {
+            bail!("PutObject {key}: HTTP {}", resp.status());
+        }
+        Ok(total)
+    }
+}
+
+/// A `Read` that reports cumulative bytes read through a callback — how upload
+/// progress is driven, without the S3 layer knowing about the UI.
+struct ProgressReader<R, F> {
+    inner: R,
+    uploaded: u64,
+    on_progress: F,
+}
+
+impl<R: Read, F: FnMut(u64)> Read for ProgressReader<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.uploaded += n as u64;
+        (self.on_progress)(self.uploaded);
+        Ok(n)
+    }
 }
 
 /// Sign a presigned GET URL. Free function so it's unit-testable with fixed
@@ -188,6 +231,29 @@ mod tests {
             "expiry not in URL: {url}"
         );
         assert!(url.contains("X-Amz-Signature="), "not signed: {url}");
+    }
+
+    #[test]
+    fn progress_reader_reports_cumulative_bytes() {
+        use std::cell::Cell;
+        let last = Cell::new(0u64);
+        let mut r = ProgressReader {
+            inner: std::io::Cursor::new(vec![0u8; 100]),
+            uploaded: 0,
+            on_progress: |u| last.set(u),
+        };
+        let mut buf = [0u8; 30];
+        let mut total = 0;
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+        drop(r); // release the borrow the callback holds on `last`
+        assert_eq!(total, 100);
+        assert_eq!(last.get(), 100);
     }
 
     #[test]
