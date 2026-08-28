@@ -151,6 +151,7 @@ fn put_policy_item(
         "id": {"S": id},
         "s3_key": {"S": s3_key},
         "downloads_remaining": {"N": downloads.to_string()},
+        "downloads_total": {"N": downloads.to_string()},
         "expires_at": {"N": expires_at.to_string()},
         "created_at": {"N": now_epoch().to_string()},
     })

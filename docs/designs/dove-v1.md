@@ -259,6 +259,12 @@ UI-gated by default with a `--secret-message` style opt-in for PIN-gating.
 
 ## Custom domain (post-provision, opt-in)
 
+The pretty share URL is expected to be a **subdomain** — `share.dove.sh` or
+`d.dove.sh` — not a path on the apex. A subdomain gets its own CloudFront
+distribution + cert cleanly, keeps the marketing site (apex `dove.sh`) and the
+share front on separate distributions, and reads well in a link. The operator's
+own custom domain (`dove domain add`) is likewise a subdomain they control.
+
 `dove provision --full` hands back a working `*.cloudfront.net` URL immediately —
 zero domain required, shares work out of the box. Then, as a **separate later
 step**, `dove domain add share.you.com` wires a custom domain. The one honest

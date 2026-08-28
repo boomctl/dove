@@ -105,4 +105,55 @@ body{min-height:100vh;background:radial-gradient(circle at 50% -15%,var(--green-
       pinForm.removeAttribute('aria-busy'); pinInput.readOnly = false; pinInput.setAttribute('aria-invalid', 'true'); if (pinSubmit) { pinSubmit.disabled = false; pinSubmit.classList.remove('verifying'); const label = pinSubmit.querySelector('.button-label'); if (label) label.textContent = 'Try again'; } if (pinError) pinError.textContent = `That PIN didn’t match — ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} left.`; pinInput.focus(); pinInput.select();
     }, 850);
   });
+
+  // ── Populate the page from the gate's free /meta endpoint (no decrement).
+  const LARGE_BYTES = 500 * 1024 * 1024; // over this → hand off to the CLI
+  function humanSize(n) {
+    const u = ['B', 'KB', 'MB', 'GB', 'TB']; let b = n, i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return (i >= 3 ? b.toFixed(1) : Math.round(b)) + ' ' + u[i];
+  }
+  function humanLeft(secs) {
+    if (secs <= 0) return 'expired';
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    if (d > 0) return `${d} day${d > 1 ? 's' : ''}${h ? `, ${h} hour${h > 1 ? 's' : ''}` : ''}`;
+    if (h > 0) return `${h} hour${h > 1 ? 's' : ''}${m ? `, ${m} min` : ''}`;
+    return `${m} min`;
+  }
+  function showGone(title, msg) {
+    const card = document.querySelector('.file-card');
+    if (card) card.innerHTML = `<div class="status-body"><p class="overline danger">Share unavailable</p><h1 id="file-title">${title}</h1><p>${msg}</p><div class="next-step"><strong>Need the file?</strong><span>Ask the sender to create a new share.</span></div></div>`;
+  }
+  (async () => {
+    if (!shareId) return;
+    let meta;
+    try {
+      const r = await fetch(`${location.origin}/meta/${shareId}`);
+      if (r.status === 404) return showGone('This share is unavailable.', 'It may have been revoked, or it never existed.');
+      if (!r.ok) return; // leave the page as-is on a transient error
+      meta = await r.json();
+    } catch { return; }
+
+    const now = Math.floor(Date.now() / 1000);
+    const size = meta.size || 0;
+    const ext = (meta.name || '').split('.').pop().toUpperCase().slice(0, 4);
+    const title = document.querySelector('#file-title'); if (title) title.textContent = meta.name || filename;
+    const glyph = document.querySelector('.file-glyph span'); if (glyph && ext) glyph.textContent = ext;
+    const metaEl = document.querySelector('.meta'); if (metaEl && size) metaEl.textContent = `${humanSize(size)}${ext ? ` · ${ext} file` : ''}`;
+    const strongs = document.querySelectorAll('.policy strong');
+    if (strongs[0]) strongs[0].textContent = humanLeft(meta.expires_at - now);
+    if (strongs[1]) strongs[1].textContent = meta.downloads_total ? `${meta.downloads_remaining} of ${meta.downloads_total}` : `${meta.downloads_remaining}`;
+
+    if (meta.expires_at <= now) return showGone('This share has expired.', 'dove stopped serving the file when its window ended.');
+    if (meta.downloads_remaining <= 0) return showGone('No downloads remain.', 'This share reached the limit its sender set.');
+
+    if (size > LARGE_BYTES) {
+      const ready = document.querySelector('#ready-state');
+      if (ready) {
+        ready.innerHTML = `<div class="large-file"><p class="overline">Large file · ${humanSize(size)}</p><h2>Use dove to save this file.</h2><p>This file is too large to decrypt reliably in a browser. dove streams it to disk without holding it all in memory.</p><div class="command"><code>dove get ${location.href}</code><button type="button"><span>Copy</span></button></div><a class="canonical-link" href="https://dove.sh/#install">Get dove at <strong>dove.sh</strong></a></div>`;
+        const btn = ready.querySelector('button'); const code = ready.querySelector('code');
+        btn && btn.addEventListener('click', async () => { await navigator.clipboard.writeText(code.textContent); const s = btn.querySelector('span'); if (s) { s.textContent = 'Copied'; setTimeout(() => { s.textContent = 'Copy'; }, 1500); } });
+      }
+    }
+  })();
 </script>  </body></html>

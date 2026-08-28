@@ -67,6 +67,7 @@ def _meta(share_id):
     body = json.dumps(
         {
             "downloads_remaining": int(item["downloads_remaining"]["N"]),
+            "downloads_total": int(item.get("downloads_total", {}).get("N", "0")),
             "expires_at": int(item["expires_at"]["N"]),
             "size": size,
             "name": s3_key.split("/", 1)[-1],
