@@ -18,6 +18,9 @@ path = "src/main.rs"
 # Added as the implementation lands, per docs/designs/dove-v1.md.
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
+rusty-s3 = "0.5"
+ureq = "2"
 
 [dev-dependencies]

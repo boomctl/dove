@@ -7,6 +7,7 @@
 
 mod config;
 mod duration;
+mod s3;
 
 fn main() {
     println!(
