@@ -9,6 +9,7 @@
 mod config;
 mod crypto;
 mod duration;
+mod gate;
 mod get;
 mod provision;
 mod s3;

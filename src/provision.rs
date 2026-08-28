@@ -181,6 +181,8 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         region: args.region.clone(),
         profile,
         endpoint: None,
+        table: None,
+        gate_url: None,
     }
     .save()?;
 

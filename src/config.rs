@@ -20,6 +20,21 @@ pub struct Config {
     /// Optional S3-compatible endpoint (MinIO, R2, …); omitted → real AWS S3.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// DynamoDB table holding share policies — full tier only.
+    #[serde(default)]
+    pub table: Option<String>,
+    /// The access-gate base URL (a Lambda Function URL). Its presence marks the
+    /// config as full-tier: `share` registers a policy and points links at the
+    /// gate instead of handing out a raw presigned URL.
+    #[serde(default)]
+    pub gate_url: Option<String>,
+}
+
+impl Config {
+    /// Whether this config is provisioned for the full (gated, encrypted) tier.
+    pub fn is_full(&self) -> bool {
+        self.gate_url.is_some()
+    }
 }
 
 impl Config {
@@ -72,9 +87,12 @@ mod tests {
             region: "us-east-1".into(),
             profile: Some("work".into()),
             endpoint: None,
+            table: Some("dove-shares-example".into()),
+            gate_url: Some("https://x.lambda-url.us-east-1.on.aws".into()),
         };
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), cfg);
+        assert!(cfg.is_full());
     }
 
     #[test]
