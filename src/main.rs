@@ -53,6 +53,15 @@ enum Command {
         #[arg(long, default_value = "3d")]
         expires: String,
     },
+    /// List the shares currently in the bucket.
+    Ls,
+    /// Revoke a share early by its id, so its link 404s.
+    Revoke {
+        /// The share id (the prefix shown by `dove ls`).
+        id: String,
+    },
+    /// Show what's provisioned and whether the bucket is reachable.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -69,5 +78,8 @@ fn main() -> Result<()> {
             expire_days,
         }),
         Command::Share { file, expires } => share::run(&file, &expires),
+        Command::Ls => share::list(),
+        Command::Revoke { id } => share::revoke(&id),
+        Command::Status => share::status(),
     }
 }

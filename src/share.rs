@@ -40,6 +40,57 @@ pub fn run(file: &Path, expires: &str) -> Result<()> {
     Ok(())
 }
 
+/// `dove ls` — the shares currently in the bucket (filename + share id).
+pub fn list() -> Result<()> {
+    let store = Store::new(&Config::load()?)?;
+    let keys = store.list("")?;
+    if keys.is_empty() {
+        eprintln!("no shares yet — `dove share <file>` to make one");
+        return Ok(());
+    }
+    for key in keys {
+        println!("{}", share_row(&key));
+    }
+    Ok(())
+}
+
+/// `dove revoke <id>` — delete a share early, so its link 404s (it would have
+/// been reaped by the lifecycle rule anyway).
+pub fn revoke(id: &str) -> Result<()> {
+    let store = Store::new(&Config::load()?)?;
+    let keys = store.list(&format!("{id}/"))?;
+    let key = keys
+        .first()
+        .ok_or_else(|| anyhow!("no share with id {id}"))?;
+    store.delete_object(key)?;
+    let name = key.split_once('/').map(|(_, n)| n).unwrap_or(key);
+    println!("revoked {name} ({id}) — the link now 404s");
+    Ok(())
+}
+
+/// `dove status` — what's provisioned, and whether the bucket is reachable.
+pub fn status() -> Result<()> {
+    let cfg = Config::load()?;
+    println!("  {} {}", ui::dim("bucket "), cfg.bucket);
+    println!("  {} {}", ui::dim("region "), cfg.region);
+    if let Some(p) = &cfg.profile {
+        println!("  {} {}", ui::dim("profile"), p);
+    }
+    match Store::new(&cfg).and_then(|s| s.list("")) {
+        Ok(keys) => println!("  {} {}", ui::dim("shares "), keys.len()),
+        Err(e) => eprintln!("  {} couldn't reach the bucket: {e:#}", ui::dim("shares ")),
+    }
+    Ok(())
+}
+
+/// One `ls` row: filename then the dim share id. Pure, so it's testable.
+fn share_row(key: &str) -> String {
+    match key.split_once('/') {
+        Some((id, name)) => format!("  {}  {}", name, ui::dim(id)),
+        None => format!("  {key}"),
+    }
+}
+
 /// A share object key: a random prefix so filenames neither collide nor expose
 /// a guessable listing — `<8 hex>/<filename>`.
 fn share_key(filename: &str) -> String {
@@ -64,5 +115,12 @@ mod tests {
         assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
         // Randomised: two keys for the same name differ.
         assert_ne!(share_key("report.pdf"), share_key("report.pdf"));
+    }
+
+    #[test]
+    fn share_row_shows_name_and_id() {
+        let row = share_row("ab12cd34/report.pdf");
+        assert!(row.contains("report.pdf"), "{row}");
+        assert!(row.contains("ab12cd34"), "{row}");
     }
 }
