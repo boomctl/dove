@@ -4,42 +4,66 @@
 
 use crate::config::Config;
 use crate::s3::Store;
-use crate::{duration as dur, ui};
+use crate::{crypto, duration as dur, ui};
 use anyhow::{anyhow, bail, Context, Result};
 use std::fs::File;
-use std::io::{Seek, Write};
+use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn run(path: &Path, expires: &str) -> Result<()> {
+pub fn run(path: &Path, expires: &str, encrypt: bool) -> Result<()> {
     let ttl = dur::parse(expires)?;
     if !dur::within_presign_limit(ttl) {
         bail!(
             "--expires {expires} is over the 7-day limit for the simple tier's presigned links.\n\
-             Use 7d or less. Longer-lived shares (and download limits, and encryption) are the \
-             full tier — see https://dove.sh."
+             Use 7d or less. Longer-lived shares (and download limits) are the full tier — see \
+             https://dove.sh."
         );
     }
-    // Fail fast if not provisioned, before we spend time zipping a directory.
+    // Fail fast if not provisioned, before we spend time zipping/encrypting.
     let cfg = Config::load()?;
     let store = Store::new(&cfg)?;
 
     // A file uploads as-is; a directory is zipped to a temp file first.
-    let (upload, name, temp) = prepare_upload(path)?;
-    let key = share_key(&name);
+    let (source, name, zip_temp) = prepare_upload(path)?;
 
+    // With --encrypt, encrypt to a temp ciphertext and upload that; the content
+    // key rides the link's #fragment and never touches a server.
+    let (upload, ct_temp, fragment) = if encrypt {
+        let content_key = crypto::gen_key();
+        let ct = temp_zip_path();
+        ui::step("encrypting", || {
+            let reader = File::open(&source)?;
+            let writer = BufWriter::new(File::create(&ct)?);
+            crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
+        })?;
+        (
+            ct.clone(),
+            Some(ct),
+            Some(crypto::key_to_fragment(&content_key)),
+        )
+    } else {
+        (source.clone(), None, None)
+    };
+
+    let object_key = share_key(&name);
     let size = std::fs::metadata(&upload)?.len();
     let bar = ui::Progress::new("uploading", size);
-    let uploaded = store.put_file(&key, &upload, |done| bar.set(done));
-    if let Some(tmp) = &temp {
-        let _ = std::fs::remove_file(tmp); // clean the temp zip, success or not
+    let uploaded = store.put_file(&object_key, &upload, |done| bar.set(done));
+    // Clean temps whether the upload succeeded or not.
+    for t in [zip_temp, ct_temp].into_iter().flatten() {
+        let _ = std::fs::remove_file(t);
     }
     uploaded?;
     bar.finish();
     ui::status("uploaded", &ui::human_size(size));
 
-    let url = store.presign_get(&key, ttl);
+    let mut url = store.presign_get(&object_key, ttl);
+    if let Some(frag) = fragment {
+        url.push('#');
+        url.push_str(&frag);
+    }
     ui::share_result(&url, &format!("expires in {}", dur::human_long(ttl)));
     Ok(())
 }

@@ -9,6 +9,7 @@
 mod config;
 mod crypto;
 mod duration;
+mod get;
 mod provision;
 mod s3;
 mod secrets;
@@ -58,6 +59,19 @@ enum Command {
         /// How long the link stays valid (≤ 7d): `3d`, `12h`, `30m`.
         #[arg(long, default_value = "3d")]
         expires: String,
+        /// Encrypt end-to-end: the file is encrypted before upload and the key
+        /// rides the link's `#fragment`, never sent to a server. Fetch with
+        /// `dove get`.
+        #[arg(long)]
+        encrypt: bool,
+    },
+    /// Fetch and decrypt an encrypted dove share link (key rides the #fragment).
+    Get {
+        /// The share URL, including its `#key` fragment.
+        url: String,
+        /// Write to this path instead of the filename from the link.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
     /// List the shares currently in the bucket.
     Ls,
@@ -85,7 +99,12 @@ fn main() -> Result<()> {
             profile,
             expire_days,
         }),
-        Command::Share { file, expires } => share::run(&file, &expires),
+        Command::Share {
+            file,
+            expires,
+            encrypt,
+        } => share::run(&file, &expires, encrypt),
+        Command::Get { url, out } => get::run(&url, out.as_deref()),
         Command::Ls => share::list(),
         Command::Revoke { id } => share::revoke(&id),
         Command::Status => share::status(),
