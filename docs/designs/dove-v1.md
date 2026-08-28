@@ -182,6 +182,30 @@ exactly this. The fix: don't decrement on page load. The decryptor page loads
 freely (static, no secret); the **ciphertext fetch that decrements** requires an
 explicit user action (a click) and a nonce/POST an unfurler won't replay.
 
+## PIN-locked shares (out-of-band second factor)
+
+For genuinely sensitive payloads — credentials, banking details — a share can be
+locked with a short **PIN that the sender delivers out of band** (a text, a phone
+call), separate from the link. Then intercepting the link alone isn't enough:
+you need the link *and* the PIN, over two channels.
+
+It binds cleanly to the full tier's encryption. The real decryption key is
+derived, not carried: `key = KDF(fragment_secret, PIN)` (a slow KDF —
+Argon2/PBKDF2 — over the fragment secret salted/peppered with the PIN). The URL
+fragment carries only `fragment_secret`; the recipient must also enter the PIN
+(received out of band) for the browser page or `dove get` to derive the real key
+and decrypt. **The server still never sees the key or the PIN** — both are used
+only client-side — so the "infrastructure can't read the file" guarantee holds,
+now with a second factor on top.
+
+Notes and edges: the KDF must be slow enough that a short PIN isn't brute-forced
+offline against the ciphertext (Argon2 with sane parameters), which is the whole
+reason a 4–6 digit PIN is acceptable here; combine it with the access policy's
+download limit so a wrong-PIN attempt doesn't get unlimited tries against a
+live object. This is a **full-tier** feature — the simple tier has no
+client-side key to bind a PIN to. `dove share <file> --pin` (prompt for the PIN,
+never echo it; print the link and remind you to send the PIN separately).
+
 ## Custom domain (post-provision, opt-in)
 
 `dove provision --full` hands back a working `*.cloudfront.net` URL immediately —
