@@ -6,6 +6,7 @@
 //! credentials.
 
 use crate::config::Config;
+use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::Write;
 use std::process::Command;
@@ -39,6 +40,8 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         bail!("the AWS CLI (`aws`) is required for provisioning — https://aws.amazon.com/cli/");
     }
 
+    ui::heading("dove provision · simple tier");
+
     // The only thing dove asks: which profile. Everything else is derived.
     let profile = match &args.profile {
         Some(p) => Some(p.clone()),
@@ -57,12 +60,13 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| format!("dove-shares-{account}"));
 
-    println!("About to provision the simple tier in AWS account {account}");
-    println!("  identity: {arn}");
-    println!("  bucket:   {bucket} ({})", args.region);
-    if !confirm("Proceed?")? {
+    ui::field("account", &account);
+    ui::field("identity", &arn);
+    ui::field("bucket", &format!("{bucket}  ({})", args.region));
+    if !confirm("proceed?")? {
         bail!("aborted");
     }
+    eprintln!();
 
     // 1. Create the bucket. us-east-1 must NOT get a LocationConstraint.
     let mut create = vec!["s3api", "create-bucket", "--bucket", &bucket];
@@ -73,36 +77,42 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         create.push("--create-bucket-configuration");
         create.push(&lc);
     }
-    aws_ok(profile.as_deref(), &create, &["BucketAlreadyOwnedByYou"])?;
+    ui::step("creating bucket", || {
+        aws_ok(profile.as_deref(), &create, &["BucketAlreadyOwnedByYou"])
+    })?;
 
     // 2. Block ALL public access — shares are reached by presigned URL only.
-    aws_ok(
-        profile.as_deref(),
-        &[
-            "s3api",
-            "put-public-access-block",
-            "--bucket",
-            &bucket,
-            "--public-access-block-configuration",
-            PUBLIC_ACCESS_BLOCK,
-        ],
-        &[],
-    )?;
+    ui::step("blocking public access", || {
+        aws_ok(
+            profile.as_deref(),
+            &[
+                "s3api",
+                "put-public-access-block",
+                "--bucket",
+                &bucket,
+                "--public-access-block-configuration",
+                PUBLIC_ACCESS_BLOCK,
+            ],
+            &[],
+        )
+    })?;
 
     // 3. Lifecycle: auto-delete objects after the ceiling of days.
     let lifecycle = lifecycle_config(args.expire_days);
-    aws_ok(
-        profile.as_deref(),
-        &[
-            "s3api",
-            "put-bucket-lifecycle-configuration",
-            "--bucket",
-            &bucket,
-            "--lifecycle-configuration",
-            &lifecycle,
-        ],
-        &[],
-    )?;
+    ui::step(&format!("lifecycle · {} days", args.expire_days), || {
+        aws_ok(
+            profile.as_deref(),
+            &[
+                "s3api",
+                "put-bucket-lifecycle-configuration",
+                "--bucket",
+                &bucket,
+                "--lifecycle-configuration",
+                &lifecycle,
+            ],
+            &[],
+        )
+    })?;
 
     Config {
         bucket,
@@ -112,8 +122,13 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
     }
     .save()?;
 
-    println!("✓ provisioned — `dove share <file>` is ready.");
-    println!("  objects auto-delete after {} days.", args.expire_days);
+    ui::done(
+        "provisioned",
+        &format!(
+            "dove share <file> is ready — objects auto-delete after {} days",
+            args.expire_days
+        ),
+    );
     Ok(())
 }
 
@@ -155,13 +170,17 @@ fn choose_profile() -> Result<Option<String>> {
     if profiles.is_empty() {
         return Ok(None); // default credential chain
     }
-    println!("Which AWS profile should dove use?");
-    println!("  0) default credential chain");
+    eprintln!("  {}", ui::dim("which AWS profile?"));
     for (i, p) in profiles.iter().enumerate() {
-        println!("  {}) {}", i + 1, p);
+        eprintln!("    {}  {}", ui::bold(&(i + 1).to_string()), p);
     }
-    print!("Enter a number [0-{}]: ", profiles.len());
-    std::io::stdout().flush()?;
+    eprintln!(
+        "    {}  {}",
+        ui::dim("0"),
+        ui::dim("default credential chain")
+    );
+    eprint!("  {} ", ui::dim("→"));
+    std::io::stderr().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let n: usize = line
@@ -170,6 +189,7 @@ fn choose_profile() -> Result<Option<String>> {
         .ok()
         .filter(|n| *n <= profiles.len())
         .ok_or_else(|| anyhow!("not a valid choice: {:?}", line.trim()))?;
+    eprintln!();
     Ok(if n == 0 {
         None
     } else {
@@ -189,8 +209,8 @@ fn caller_identity(profile: Option<&str>) -> Result<(String, String)> {
 }
 
 fn confirm(prompt: &str) -> Result<bool> {
-    print!("{prompt} [y/N]: ");
-    std::io::stdout().flush()?;
+    eprint!("  {} {} ", ui::dim(prompt), ui::dim("[y/N] →"));
+    std::io::stderr().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))

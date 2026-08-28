@@ -29,10 +29,49 @@ pub fn dim(s: &str) -> String {
 pub fn bold(s: &str) -> String {
     wrap(s, "1")
 }
-// Part of the palette; used by success/status states (ls / revoke, next task).
-#[allow(dead_code)]
 pub fn green(s: &str) -> String {
     wrap(s, "32")
+}
+pub fn red(s: &str) -> String {
+    wrap(s, "31")
+}
+
+/// A section heading (bold, with breathing room) — e.g. `dove provision · simple`.
+pub fn heading(s: &str) {
+    eprintln!("\n  {}\n", bold(s));
+}
+
+/// An aligned `label   value` line: dim, left-padded label then the value.
+pub fn field(label: &str, value: &str) {
+    eprintln!("  {}  {}", dim(&format!("{label:<8}")), value);
+}
+
+/// Run a provisioning step with a trailing ✓/✗ — dim label, green check on
+/// success, red cross on failure. Returns the step's result unchanged.
+pub fn step<T>(label: &str, work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let padded = format!("{label:<24}");
+    if tty() {
+        eprint!("  {} {}", dim(&padded), dim("·"));
+        let _ = std::io::stderr().flush();
+    }
+    let result = work();
+    let mark = if result.is_ok() {
+        green("✓")
+    } else {
+        red("✗")
+    };
+    if tty() {
+        eprintln!("\r  {} {}", dim(&padded), mark);
+    }
+    result
+}
+
+/// A final success line: green ✓, a bold subject, and a dim note beneath.
+pub fn done(subject: &str, note: &str) {
+    eprintln!("\n  {} {}", green("✓"), bold(subject));
+    if !note.is_empty() {
+        eprintln!("  {}", dim(note));
+    }
 }
 
 /// Human-readable byte size: `842 MB`, `1.4 GB`. Bytes/KB/MB are whole; GB/TB
