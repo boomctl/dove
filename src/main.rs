@@ -5,6 +5,7 @@
 //!
 //! https://dove.sh
 
+mod config;
 mod duration;
 
 fn main() {
