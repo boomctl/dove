@@ -5,6 +5,8 @@
 //!
 //! https://dove.sh
 
+mod duration;
+
 fn main() {
     println!(
         "dove {} — scaffold only; see docs/designs/dove-v1.md",

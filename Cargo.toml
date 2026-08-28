@@ -16,5 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 # Added as the implementation lands, per docs/designs/dove-v1.md.
+anyhow = "1"
 
 [dev-dependencies]
