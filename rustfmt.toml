@@ -1,0 +1,3 @@
+# Formatting is enforced in CI (`cargo fmt --check`). Defaults, stated
+# explicitly so the toolchain is unambiguous.
+edition = "2021"

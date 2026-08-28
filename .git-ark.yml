@@ -1,0 +1,5 @@
+# git-ark backup policy for this repo. Only these refs are bundled, encrypted
+# client-side, and pushed to the vault. No `github:` block yet — dove is
+# vault-only until it's published to github.com/boomctl/dove.
+backup_refs:
+  - main

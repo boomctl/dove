@@ -1,0 +1,38 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Secrets & keys — NEVER commit these. dove mints share keys and holds cloud
+# credentials; none of that belongs in git.
+secrets.toml
+*.key
+*.pem
+*.age
+id_*
+!id_*.pub
+*.identity
+.env
+.env.*
+aws-credentials*
+
+# Real (non-example) local config
+config.toml
+config.local.toml
+
+# Local test artifacts / share scratch
+/shares
+/scratch
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local agent / worktree scratch
+.claude/
+# SDD / planning scratch — design lives in docs/designs/; specs, plans, and
+# ledgers are local process artifacts and never belong in this OSS repo.
+docs/superpowers/
+.superpowers/

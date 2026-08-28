@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Rust dependencies — keep the tree current and patched.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  # Pin and update GitHub Actions (supply-chain: actions are code too).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

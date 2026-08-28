@@ -1,0 +1,90 @@
+name: Release
+
+# Cut a release by pushing a v* tag. Builds the platform matrix, publishes the
+# binaries with a SHA256SUMS manifest, and signs everything with Sigstore
+# (keyless — the workflow's own OIDC identity is the signer, and the signature
+# lands in the public transparency log, so anyone can verify with `cosign
+# verify-blob`). No private key to manage.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to cut (e.g. v0.1.0)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write   # create the release + upload assets
+  id-token: write   # Sigstore keyless signing via OIDC
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin,        runner: macos-latest,   ext: ""    }
+          - { target: x86_64-apple-darwin,         runner: macos-latest,   ext: ""    }
+          - { target: x86_64-unknown-linux-musl,   runner: ubuntu-latest,  ext: ""    }
+          - { target: aarch64-unknown-linux-musl,  runner: ubuntu-latest,  ext: ""    }
+          - { target: x86_64-pc-windows-msvc,      runner: windows-latest, ext: ".exe" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: install musl tools
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add ${{ matrix.target }}
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/dove${{ matrix.ext }}" \
+             "dist/dove-${{ matrix.target }}${{ matrix.ext }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dove-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: sign + publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: collect binaries + checksums
+        run: |
+          mkdir -p dist
+          find staged -type f -exec cp {} dist/ \;
+          cd dist
+          sha256sum dove-* > SHA256SUMS
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+      - name: sign artifacts (keyless)
+        run: |
+          cd dist
+          for f in dove-* SHA256SUMS; do
+            cosign sign-blob --yes \
+              --output-signature "$f.sig" \
+              --output-certificate "$f.pem" \
+              "$f"
+          done
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

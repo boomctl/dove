@@ -1,0 +1,20 @@
+[package]
+name = "dove"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Send a file out of your own cloud — encrypted, expiring, one command."
+repository = "https://github.com/boomctl/dove"
+homepage = "https://dove.sh"
+readme = "README.md"
+keywords = ["file-sharing", "s3", "encryption", "ephemeral", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "dove"
+path = "src/main.rs"
+
+[dependencies]
+# Added as the implementation lands, per docs/designs/dove-v1.md.
+
+[dev-dependencies]
