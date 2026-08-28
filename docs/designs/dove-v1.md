@@ -222,6 +222,41 @@ key to bind a PIN to. `dove share <file> --pin` prompts for the PIN (never
 echoed), prints the link, and reminds you to send the PIN over a separate
 channel.
 
+## The trust dimension: sender name + message
+
+A recipient who lands on a share link has no built-in way to know it's genuinely
+from who they think. So the sender can attach a **name** and a **message**:
+`dove share <file> --from "Alice" --message "the Q3 numbers we discussed"`.
+
+**The name shows *before* PIN entry** — it's the trust signal that lets the
+recipient corroborate the out-of-band context ("yes, Alice said she'd send
+this") *before* they type the PIN. The message shows on unlock.
+
+Keeping this E2E (the server learns neither the name nor the message) is the
+elegant part, and it works because the browser already holds the fragment key on
+page load:
+
+- Name + message are encrypted client-side with the **fragment key** into a
+  small **metadata blob**, stored alongside the share (a DynamoDB field or a
+  tiny S3 object).
+- The gate serves that blob **freely** — no PIN, no download decrement (so a
+  link-unfurler fetching it costs nothing). The browser decrypts it with the
+  fragment key and shows the **name immediately, pre-PIN**. The server only ever
+  held ciphertext.
+
+**One decision to make** on the message:
+
+- **UI-gated (simpler):** the message travels in the same free metadata blob and
+  is merely *displayed* after unlock. Anyone with the link could technically
+  decrypt it pre-PIN — fine for a friendly note, not for a secret.
+- **PIN-gated (stronger):** the message is bound to the PIN (only decryptable
+  once the PIN is known/verified), so it's protected the same as the file.
+  Right when the message itself is sensitive.
+
+Leaning: name is always the free, pre-PIN, E2E trust signal; the message is
+UI-gated by default with a `--secret-message` style opt-in for PIN-gating.
+(`--from`/`--message` are full-tier; the simple tier has no page to show them on.)
+
 ## Custom domain (post-provision, opt-in)
 
 `dove provision --full` hands back a working `*.cloudfront.net` URL immediately —
