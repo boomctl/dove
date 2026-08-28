@@ -55,6 +55,41 @@ pub fn key_from_fragment(s: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow!("key in the link is the wrong length"))
 }
 
+/// PBKDF2 iterations for PIN-locked shares. High enough that a leaked ciphertext
+/// (past the gate) resists offline PIN brute force; fast enough (~100-200ms) that
+/// a legitimate unlock is instant. Both Rust and WebCrypto run the same count.
+pub const PBKDF2_ITERS: u32 = 600_000;
+
+/// Derive the content key for a PIN-locked share: `PBKDF2-HMAC-SHA256(PIN,
+/// salt = fragment_secret)`. The fragment carries only `fragment_secret` (high
+/// entropy); the PIN (delivered out of band) is the second factor folded in. The
+/// server never sees either, so end-to-end confidentiality holds. WebCrypto's
+/// PBKDF2 with the same inputs produces byte-identical output.
+pub fn derive_key(pin: &str, fragment_secret: &[u8; 32]) -> [u8; 32] {
+    pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(pin.as_bytes(), fragment_secret, PBKDF2_ITERS)
+}
+
+/// The salted hash the gate stores to verify a PIN online: `hex(SHA-256(id ":"
+/// pin))`. The gate rate-limits and locks, so this need only resist a DB leak,
+/// not an online guessing attack. The Python gate computes the same string.
+pub fn pin_hash(share_id: &str, pin: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(share_id.as_bytes());
+    h.update(b":");
+    h.update(pin.as_bytes());
+    hex_lower(&h.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    s
+}
+
 /// Encrypt `reader` into `writer` as the chunked container above.
 pub fn encrypt<R: Read, W: Write>(
     key: &[u8; 32],
@@ -231,5 +266,38 @@ mod tests {
     fn key_fragment_round_trips() {
         let key = gen_key();
         assert_eq!(key_from_fragment(&key_to_fragment(&key)).unwrap(), key);
+    }
+
+    #[test]
+    fn pbkdf2_matches_standard_vector() {
+        // Known PBKDF2-HMAC-SHA256 vector (password="password", salt="salt",
+        // 1 iteration, 32 bytes) — locks us to standard PBKDF2 so WebCrypto's
+        // deriveBits with the same inputs is byte-identical.
+        let mut key = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(b"password", b"salt", 1, &mut key);
+        let expect = [
+            0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4,
+            0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c,
+            0xb7, 0x0b, 0xe1, 0x7b,
+        ];
+        assert_eq!(key, expect);
+    }
+
+    #[test]
+    fn derive_key_binds_pin_and_fragment() {
+        let frag = [7u8; 32];
+        // Same inputs → same key; different PIN or fragment → different key.
+        assert_eq!(derive_key("4917", &frag), derive_key("4917", &frag));
+        assert_ne!(derive_key("4917", &frag), derive_key("0000", &frag));
+        assert_ne!(derive_key("4917", &frag), derive_key("4917", &[8u8; 32]));
+    }
+
+    #[test]
+    fn pin_hash_is_stable_and_salted_by_id() {
+        // Deterministic, and the id salts it so the same PIN hashes differently
+        // per share (must match the Python gate's sha256(id ":" pin)).
+        assert_eq!(pin_hash("abc123", "4917"), pin_hash("abc123", "4917"));
+        assert_ne!(pin_hash("abc123", "4917"), pin_hash("def456", "4917"));
+        assert_eq!(pin_hash("abc123", "4917").len(), 64);
     }
 }

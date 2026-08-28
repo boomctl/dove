@@ -12,6 +12,7 @@ It never sees the decryption key — that rides the URL fragment, which browsers
 and HTTP clients never send. Environment: BUCKET, TABLE.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -21,6 +22,11 @@ import boto3
 
 BUCKET = os.environ["BUCKET"]
 TABLE = os.environ["TABLE"]
+
+# Wrong-PIN guesses allowed before the share locks. Small, because the gate
+# checks online — a handful of tries against a 6-digit PIN is negligible odds,
+# and locking makes brute force impossible rather than merely slow.
+MAX_PIN_ATTEMPTS = 5
 
 _ddb = boto3.client("dynamodb")
 _s3 = boto3.client("s3")
@@ -49,7 +55,8 @@ def handler(event, _context):
         return _meta(share_id)
 
     if route == "dl":
-        return _download(share_id)
+        params = event.get("queryStringParameters") or {}
+        return _download(share_id, params.get("pin"))
 
     return _resp(404, "not a dove share link")
 
@@ -64,6 +71,8 @@ def _meta(share_id):
         size = _s3.head_object(Bucket=BUCKET, Key=s3_key)["ContentLength"]
     except Exception:  # noqa: BLE001
         pass
+    pin_required = "pin_hash" in item
+    locked = pin_required and int(item.get("pin_attempts", {}).get("N", "0")) >= MAX_PIN_ATTEMPTS
     body = json.dumps(
         {
             "downloads_remaining": int(item["downloads_remaining"]["N"]),
@@ -71,13 +80,65 @@ def _meta(share_id):
             "expires_at": int(item["expires_at"]["N"]),
             "size": size,
             "name": s3_key.split("/", 1)[-1],
+            "pin_required": pin_required,
+            "locked": locked,
         }
     )
     return _resp(200, body, "application/json", {"access-control-allow-origin": "*"})
 
 
-def _download(share_id):
+def _pin_gate(share_id, item, pin):
+    """Verify a PIN-locked share. Returns an error response to send back, or None
+    to allow the download. A wrong guess is counted; enough of them lock it."""
+    pin_hash = item.get("pin_hash", {}).get("S")
+    if not pin_hash:
+        return None  # not PIN-locked
+    attempts = int(item.get("pin_attempts", {}).get("N", "0"))
+    if attempts >= MAX_PIN_ATTEMPTS:
+        return _resp(423, json.dumps({"error": "locked"}), "application/json")
+    if not pin:
+        return _resp(401, json.dumps({"error": "pin required"}), "application/json")
+    if hashlib.sha256(f"{share_id}:{pin}".encode()).hexdigest() == pin_hash:
+        return None  # correct — allow through
+    # Wrong. Count it atomically; the same op locks the share at the ceiling.
+    try:
+        res = _ddb.update_item(
+            TableName=TABLE,
+            Key={"id": {"S": share_id}},
+            UpdateExpression="SET pin_attempts = if_not_exists(pin_attempts, :z) + :one",
+            ConditionExpression="attribute_not_exists(pin_attempts) OR pin_attempts < :max",
+            ExpressionAttributeValues={
+                ":one": {"N": "1"},
+                ":z": {"N": "0"},
+                ":max": {"N": str(MAX_PIN_ATTEMPTS)},
+            },
+            ReturnValues="ALL_NEW",
+        )
+        remaining = max(0, MAX_PIN_ATTEMPTS - int(res["Attributes"]["pin_attempts"]["N"]))
+    except _ddb.exceptions.ConditionalCheckFailedException:
+        return _resp(423, json.dumps({"error": "locked"}), "application/json")
+    status = 423 if remaining == 0 else 401
+    error = "locked" if remaining == 0 else "wrong pin"
+    return _resp(
+        status,
+        json.dumps({"error": error, "attempts_remaining": remaining}),
+        "application/json",
+    )
+
+
+def _download(share_id, pin):
     now = int(time.time())
+    item = _ddb.get_item(TableName=TABLE, Key={"id": {"S": share_id}}).get("Item")
+    if not item:
+        return _resp(410, "this share has expired or reached its download limit")
+    if int(item["expires_at"]["N"]) <= now or int(item["downloads_remaining"]["N"]) <= 0:
+        return _resp(410, "this share has expired or reached its download limit")
+
+    # Second factor: verify the PIN (if any) before spending a download.
+    gate = _pin_gate(share_id, item, pin)
+    if gate is not None:
+        return gate
+
     try:
         # Atomic: decrement only if the share exists, has budget, and is unexpired.
         result = _ddb.update_item(

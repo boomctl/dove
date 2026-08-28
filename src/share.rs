@@ -14,10 +14,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn run(path: &Path, expires: &str, encrypt: bool, downloads: Option<u32>) -> Result<()> {
+pub fn run(
+    path: &Path,
+    expires: &str,
+    encrypt: bool,
+    downloads: Option<u32>,
+    pin: Option<String>,
+) -> Result<()> {
     let ttl = dur::parse(expires)?;
     // Fail fast if not provisioned, before we spend time zipping/encrypting.
     let cfg = Config::load()?;
+    if pin.is_some() && !cfg.is_full() {
+        bail!(
+            "--pin is a full-tier feature: it's checked at the gate, which the simple tier \
+             doesn't have. Provision it with `dove provision full`."
+        );
+    }
     let store = Store::new(&cfg)?;
     let (source, name, zip_temp) = prepare_upload(path)?;
 
@@ -29,6 +41,7 @@ pub fn run(path: &Path, expires: &str, encrypt: bool, downloads: Option<u32>) ->
             &name,
             ttl,
             downloads.unwrap_or(100),
+            pin,
             zip_temp,
         );
     }
@@ -81,6 +94,7 @@ pub fn run(path: &Path, expires: &str, encrypt: bool, downloads: Option<u32>) ->
 /// Full tier: always encrypt, register a download policy in DynamoDB, and hand
 /// out a gate link (`<gate>/d/<id>/<name>#key`) instead of a raw presigned URL.
 /// The gate enforces the budget; the key still rides the fragment.
+#[allow(clippy::too_many_arguments)]
 fn share_full(
     cfg: &Config,
     store: &Store,
@@ -88,9 +102,30 @@ fn share_full(
     name: &str,
     ttl: Duration,
     downloads: u32,
+    pin: Option<String>,
     zip_temp: Option<PathBuf>,
 ) -> Result<()> {
-    let content_key = crypto::gen_key();
+    let share_id = random_id();
+
+    // The fragment always carries a random secret. Without a PIN it *is* the
+    // content key. With a PIN, the content key is PBKDF2(PIN, secret) — the PIN
+    // (delivered out of band) is the second factor and the gate also verifies it.
+    let fragment_secret = crypto::gen_key();
+    let (content_key, resolved_pin) = match &pin {
+        Some(p) => {
+            let value = if p.trim().is_empty() {
+                gen_pin()
+            } else {
+                p.trim().to_string()
+            };
+            (crypto::derive_key(&value, &fragment_secret), Some(value))
+        }
+        None => (fragment_secret, None),
+    };
+    let pin_hash = resolved_pin
+        .as_ref()
+        .map(|p| crypto::pin_hash(&share_id, p));
+
     let ct = temp_zip_path();
     ui::step("encrypting", || {
         let reader = File::open(source)?;
@@ -98,7 +133,6 @@ fn share_full(
         crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
     })?;
 
-    let share_id = random_id();
     let object_key = format!("{share_id}/{name}");
     let size = std::fs::metadata(&ct)?.len();
     let bar = ui::Progress::new("uploading", size);
@@ -112,7 +146,14 @@ fn share_full(
 
     let expires_at = now_epoch() + ttl.as_secs();
     ui::step("registering policy", || {
-        put_policy_item(cfg, &share_id, &object_key, downloads, expires_at)
+        put_policy_item(
+            cfg,
+            &share_id,
+            &object_key,
+            downloads,
+            expires_at,
+            pin_hash.as_deref(),
+        )
     })?;
 
     let gate = cfg
@@ -122,7 +163,7 @@ fn share_full(
     let url = format!(
         "{gate}/d/{share_id}/{}#{}",
         percent_encode(name),
-        crypto::key_to_fragment(&content_key)
+        crypto::key_to_fragment(&fragment_secret)
     );
     let plural = if downloads == 1 { "" } else { "s" };
     ui::share_result(
@@ -132,7 +173,18 @@ fn share_full(
             dur::human_long(ttl)
         ),
     );
+    if let Some(p) = resolved_pin {
+        ui::pin_notice(&p);
+    }
     Ok(())
+}
+
+/// A random 6-digit PIN, zero-padded. Uniform enough for a gate-checked,
+/// rate-limited second factor (the gate locks after a handful of wrong tries).
+fn gen_pin() -> String {
+    let mut b = [0u8; 4];
+    getrandom::getrandom(&mut b).expect("OS RNG unavailable");
+    format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
 }
 
 /// Write the share's policy row to DynamoDB via the AWS CLI (operator profile).
@@ -142,20 +194,27 @@ fn put_policy_item(
     s3_key: &str,
     downloads: u32,
     expires_at: u64,
+    pin_hash: Option<&str>,
 ) -> Result<()> {
     let table = cfg
         .table
         .as_ref()
         .ok_or_else(|| anyhow!("no table in config"))?;
-    let item = serde_json::json!({
+    let mut item = serde_json::json!({
         "id": {"S": id},
         "s3_key": {"S": s3_key},
         "downloads_remaining": {"N": downloads.to_string()},
         "downloads_total": {"N": downloads.to_string()},
         "expires_at": {"N": expires_at.to_string()},
         "created_at": {"N": now_epoch().to_string()},
-    })
-    .to_string();
+    });
+    if let Some(hash) = pin_hash {
+        // pin_attempts starts at 0; the gate increments on each wrong guess and
+        // locks the share once it hits the ceiling.
+        item["pin_hash"] = serde_json::json!({"S": hash});
+        item["pin_attempts"] = serde_json::json!({"N": "0"});
+    }
+    let item = item.to_string();
     let mut cmd = Command::new("aws");
     if let Some(p) = &cfg.profile {
         cmd.args(["--profile", p]);

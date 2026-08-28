@@ -171,6 +171,21 @@ pub fn share_result(url: &str, meta: &str) {
     }
 }
 
+/// The PIN callout after a PIN-locked share: the PIN stands out, with a reminder
+/// to send it over a *separate* channel from the link. To stderr (informational),
+/// so it never pollutes a captured URL.
+pub fn pin_notice(pin: &str) {
+    if tty() {
+        eprintln!("\n  {}  {}", dim("PIN     "), bold(pin));
+        eprintln!(
+            "  {}",
+            dim("send this out of band (text, call) — separate from the link")
+        );
+    } else {
+        eprintln!("PIN {pin}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

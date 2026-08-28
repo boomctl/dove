@@ -56,55 +56,136 @@ body{min-height:100vh;background:radial-gradient(circle at 50% -15%,var(--green-
     return new Blob(parts);
   }
 
+  // PIN-locked shares: the fragment carries only a secret; the real key is
+  // PBKDF2(PIN, secret) — byte-identical to dove's Rust derivation. The PIN
+  // (out of band) is also verified at the gate, so it's a genuine second factor.
+  async function deriveKey(pin, secretBytes) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: secretBytes, iterations: 600000, hash: 'SHA-256' }, base, 256);
+    return new Uint8Array(bits);
+  }
+
+  function setPct(f) {
+    const p = Math.round(Math.max(0, Math.min(1, f)) * 100);
+    const el = document.querySelector('#percent'); const bar = document.querySelector('#progress-bar');
+    if (el) el.textContent = `${p}%`; if (bar) bar.style.width = `${p}%`;
+  }
+  function saveBlob(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+  function workDone() {
+    const working = document.querySelector('#working-state');
+    if (working) working.innerHTML = '<div class="complete"><span>✓</span><div><strong>File ready</strong><p>Your browser saved the decrypted file.</p></div></div>';
+  }
+  function workFail(msg) {
+    const working = document.querySelector('#working-state');
+    if (working) working.innerHTML = `<div class="complete"><span>✕</span><div><strong>Couldn’t open the file</strong><p>${msg}</p></div></div>`;
+  }
+
   const downloadBtn = document.querySelector('#download');
   downloadBtn && downloadBtn.addEventListener('click', async () => {
     const keyBytes = keyBytesFromFragment();
     const ready = document.querySelector('#ready-state');
     const working = document.querySelector('#working-state');
-    const setPct = (f) => {
-      const p = Math.round(Math.max(0, Math.min(1, f)) * 100);
-      const el = document.querySelector('#percent'); const bar = document.querySelector('#progress-bar');
-      if (el) el.textContent = `${p}%`; if (bar) bar.style.width = `${p}%`;
-    };
-    const fail = (msg) => { if (working) working.innerHTML = `<div class="complete"><span>✕</span><div><strong>Couldn’t open the file</strong><p>${msg}</p></div></div>`; };
-
     if (!keyBytes) { alert('This link is missing its key (nothing after #).'); return; }
     if (ready) ready.hidden = true; if (working) working.hidden = false;
     try {
       const resp = await fetch(downloadUrl);
-      if (resp.status === 410) return fail('This share has expired or reached its download limit.');
-      if (!resp.ok) return fail(`The gate returned ${resp.status}.`);
+      if (resp.status === 410) return workFail('This share has expired or reached its download limit.');
+      if (!resp.ok) return workFail(`The gate returned ${resp.status}.`);
       const buf = await resp.arrayBuffer();
       const blob = await decrypt(buf, keyBytes, setPct);
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob); a.download = filename; a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-      if (working) working.innerHTML = '<div class="complete"><span>✓</span><div><strong>File ready</strong><p>Your browser saved the decrypted file.</p></div></div>';
+      saveBlob(blob, filename);
+      workDone();
     } catch (e) {
       // AES-GCM auth failure, truncation, or a bad key — never a plaintext write.
-      fail('The file couldn’t be verified — the data may be incomplete or the key wrong.');
+      workFail('The file couldn’t be verified — the data may be incomplete or the key wrong.');
     }
   });
 
   document.querySelectorAll('[data-copy-command]').forEach((button) => button.addEventListener('click', async () => { const command = button.parentElement && button.parentElement.querySelector('code'); await navigator.clipboard.writeText((command && command.textContent) || ''); const label = button.querySelector('span'); if (label) label.textContent = 'Copied'; setTimeout(() => { if (label) label.textContent = 'Copy'; }, 1500); }));
 
-  // PIN flow — placeholder until the gate's PIN check ships.
-  const pinForm = document.querySelector('#pin-form');
-  const pinInput = document.querySelector('#share-pin');
-  const pinSubmit = document.querySelector('#pin-submit');
-  const pinError = document.querySelector('#pin-error');
-  let attemptsLeft = 3;
-  pinInput && pinInput.addEventListener('input', () => { pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 6); pinInput.removeAttribute('aria-invalid'); if (pinError) pinError.textContent = ''; });
-  pinForm && pinForm.addEventListener('submit', (event) => {
-    event.preventDefault();
-    if (!pinInput || !pinInput.checkValidity()) { if (pinInput) pinInput.setAttribute('aria-invalid', 'true'); if (pinError) pinError.textContent = 'Enter the 4–6 digit PIN the sender sent you.'; if (pinInput) pinInput.focus(); return; }
-    pinForm.setAttribute('aria-busy', 'true'); pinInput.readOnly = true; if (pinSubmit) { pinSubmit.disabled = true; pinSubmit.classList.add('verifying'); const label = pinSubmit.querySelector('.button-label'); if (label) label.textContent = 'Checking PIN…'; }
-    window.setTimeout(() => {
-      attemptsLeft -= 1;
-      if (attemptsLeft <= 0) { const entry = document.querySelector('#pin-entry-view'); const locked = document.querySelector('#pin-locked-view'); if (entry) entry.hidden = true; if (locked) locked.hidden = false; const t = document.querySelector('#pin-locked-title'); if (t) t.focus(); return; }
-      pinForm.removeAttribute('aria-busy'); pinInput.readOnly = false; pinInput.setAttribute('aria-invalid', 'true'); if (pinSubmit) { pinSubmit.disabled = false; pinSubmit.classList.remove('verifying'); const label = pinSubmit.querySelector('.button-label'); if (label) label.textContent = 'Try again'; } if (pinError) pinError.textContent = `That PIN didn’t match — ${attemptsLeft} attempt${attemptsLeft === 1 ? '' : 's'} left.`; pinInput.focus(); pinInput.select();
-    }, 850);
-  });
+  // ── PIN-locked shares. The gate verifies the PIN (rate-limited, so brute force
+  // is prevented), and it's folded into the key via PBKDF2. The entry form is
+  // injected only when /meta reports the share is PIN-locked.
+  const LOCK_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="16" r="1"/><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+
+  function pinPanelHtml() {
+    return `<div class="pin-panel" id="pin-panel">
+      <div id="pin-entry-view">
+        <span class="pin-glyph" aria-hidden="true">${LOCK_SVG}</span>
+        <p class="overline">PIN required</p>
+        <h2>Enter the PIN the sender gave you.</h2>
+        <p class="pin-intro">The sender delivered it separately — by text or a call — so the link alone is not enough to open this file.</p>
+        <form id="pin-form" novalidate>
+          <label for="share-pin">Share PIN</label>
+          <div class="pin-row"><input id="share-pin" name="share-pin" type="password" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,6}" minlength="4" maxlength="6" placeholder="••••••" required aria-describedby="pin-help pin-error" /><button id="pin-submit" type="submit"><span class="button-label">Unlock file</span></button></div>
+          <p id="pin-error" class="pin-error" role="alert" aria-live="assertive"></p>
+          <p id="pin-help" class="pin-help">4–6 digits · Wrong guesses do not use a download.</p>
+        </form>
+        <div class="pin-separation"><div><strong>PIN</strong><span>Checked by the gate<br />Rate-limited access</span></div><div><strong># fragment</strong><span>Stays on this device<br />Decrypts the file</span></div></div>
+      </div>
+      <div id="pin-locked-view" class="pin-locked-inline" hidden><span class="status-glyph danger-glyph" aria-hidden="true">${LOCK_SVG}</span><p class="overline danger">Access locked</p><h2 id="pin-locked-title" tabindex="-1">This share is locked for security.</h2><p>Too many PIN attempts were unsuccessful. The gate will not accept more guesses or release the encrypted file.</p><div class="next-step"><strong>Need the file?</strong><span>Ask the sender to revoke this share and create a new one.</span></div></div>
+    </div>`;
+  }
+
+  function showPinLocked() {
+    const entry = document.querySelector('#pin-entry-view');
+    const locked = document.querySelector('#pin-locked-view');
+    if (entry) entry.hidden = true;
+    if (locked) { locked.hidden = false; const t = locked.querySelector('#pin-locked-title'); if (t) t.focus(); }
+  }
+
+  function setupPin() {
+    const ready = document.querySelector('#ready-state');
+    if (ready) { ready.insertAdjacentHTML('beforebegin', pinPanelHtml()); ready.hidden = true; }
+    const input = document.querySelector('#share-pin');
+    const error = document.querySelector('#pin-error');
+    const submit = document.querySelector('#pin-submit');
+    input && input.addEventListener('input', () => { input.value = input.value.replace(/\D/g, '').slice(0, 6); input.removeAttribute('aria-invalid'); if (error) error.textContent = ''; });
+    const form = document.querySelector('#pin-form');
+    form && form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const secret = keyBytesFromFragment();
+      const pin = ((input && input.value) || '').replace(/\D/g, '');
+      if (!secret) { if (error) error.textContent = 'This link is missing its key (nothing after #).'; return; }
+      if (pin.length < 4) { if (input) input.setAttribute('aria-invalid', 'true'); if (error) error.textContent = 'Enter the 4–6 digit PIN the sender sent you.'; if (input) input.focus(); return; }
+      const label = submit && submit.querySelector('.button-label');
+      if (submit) submit.disabled = true; if (label) label.textContent = 'Unlocking…';
+      try {
+        const resp = await fetch(`${downloadUrl}?pin=${encodeURIComponent(pin)}`);
+        if (resp.status === 423) { showPinLocked(); return; }
+        if (resp.status === 401) {
+          let body = {}; try { body = await resp.json(); } catch {}
+          if (body.attempts_remaining === 0) { showPinLocked(); return; }
+          const n = body.attempts_remaining;
+          if (error) error.textContent = (n != null) ? `That PIN didn’t match — ${n} attempt${n === 1 ? '' : 's'} left.` : 'That PIN didn’t match.';
+          if (input) { input.setAttribute('aria-invalid', 'true'); input.select(); }
+          if (submit) submit.disabled = false; if (label) label.textContent = 'Try again';
+          return;
+        }
+        if (resp.status === 410 || !resp.ok) {
+          if (error) error.textContent = resp.status === 410 ? 'This share has expired or reached its download limit.' : `The gate returned ${resp.status}.`;
+          if (submit) submit.disabled = false; if (label) label.textContent = 'Unlock file';
+          return;
+        }
+        // Correct PIN — the gate released the ciphertext. Derive the key + decrypt.
+        const buf = await resp.arrayBuffer();
+        const key = await deriveKey(pin, secret);
+        const panel = document.querySelector('#pin-panel'); if (panel) panel.hidden = true;
+        const working = document.querySelector('#working-state'); if (working) working.hidden = false;
+        const blob = await decrypt(buf, key, setPct);
+        saveBlob(blob, filename);
+        workDone();
+      } catch (err) {
+        const panel = document.querySelector('#pin-panel'); if (panel) panel.hidden = true;
+        const working = document.querySelector('#working-state'); if (working) working.hidden = false;
+        workFail('The file couldn’t be verified — the data may be incomplete or the key wrong.');
+      }
+    });
+  }
 
   // ── Populate the page from the gate's free /meta endpoint (no decrement).
   const LARGE_BYTES = 500 * 1024 * 1024; // over this → hand off to the CLI
@@ -147,13 +228,23 @@ body{min-height:100vh;background:radial-gradient(circle at 50% -15%,var(--green-
     if (meta.expires_at <= now) return showGone('This share has expired.', 'dove stopped serving the file when its window ended.');
     if (meta.downloads_remaining <= 0) return showGone('No downloads remain.', 'This share reached the limit its sender set.');
 
+    // Already locked out on PIN — show the locked view, nothing to try here.
+    if (meta.locked) { setupPin(); showPinLocked(); return; }
+
+    // Too big to decrypt in a tab → hand off to the CLI (with --pin if locked).
     if (size > LARGE_BYTES) {
       const ready = document.querySelector('#ready-state');
       if (ready) {
-        ready.innerHTML = `<div class="large-file"><p class="overline">Large file · ${humanSize(size)}</p><h2>Use dove to save this file.</h2><p>This file is too large to decrypt reliably in a browser. dove streams it to disk without holding it all in memory.</p><div class="command"><code>dove get ${location.href}</code><button type="button"><span>Copy</span></button></div><a class="canonical-link" href="https://dove.sh/#install">Get dove at <strong>dove.sh</strong></a></div>`;
+        const cmd = `dove get ${location.href}${meta.pin_required ? ' --pin <PIN>' : ''}`;
+        const note = meta.pin_required ? '<p class="action-note">This share is PIN-locked — use the PIN the sender sent you.</p>' : '';
+        ready.innerHTML = `<div class="large-file"><p class="overline">Large file · ${humanSize(size)}</p><h2>Use dove to save this file.</h2><p>This file is too large to decrypt reliably in a browser. dove streams it to disk without holding it all in memory.</p><div class="command"><code>${cmd}</code><button type="button"><span>Copy</span></button></div><a class="canonical-link" href="https://dove.sh/#install">Get dove at <strong>dove.sh</strong></a>${note}</div>`;
         const btn = ready.querySelector('button'); const code = ready.querySelector('code');
         btn && btn.addEventListener('click', async () => { await navigator.clipboard.writeText(code.textContent); const s = btn.querySelector('span'); if (s) { s.textContent = 'Copied'; setTimeout(() => { s.textContent = 'Copy'; }, 1500); } });
       }
+      return;
     }
+
+    // Small PIN-locked file → in-browser PIN entry, then decrypt with the key.
+    if (meta.pin_required) { setupPin(); return; }
   })();
 </script>  </body></html>

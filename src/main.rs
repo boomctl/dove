@@ -70,6 +70,12 @@ enum Command {
         /// spent. Omit for a generous default.
         #[arg(long)]
         downloads: Option<u32>,
+        /// Full tier only: PIN-lock the share. The PIN is verified at the gate
+        /// (rate-limited, so brute force is prevented) and folded into the key —
+        /// send it out of band, separate from the link. `--pin` generates one;
+        /// `--pin 4917` sets your own.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        pin: Option<String>,
     },
     /// Fetch and decrypt an encrypted dove share link (key rides the #fragment).
     Get {
@@ -78,6 +84,9 @@ enum Command {
         /// Write to this path instead of the filename from the link.
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// The PIN, if the share is PIN-locked (the sender sends it separately).
+        #[arg(long)]
+        pin: Option<String>,
     },
     /// Put a custom subdomain in front of the gate (CloudFront + ACM). Full tier.
     Domain {
@@ -125,8 +134,9 @@ fn main() -> Result<()> {
             expires,
             encrypt,
             downloads,
-        } => share::run(&file, &expires, encrypt, downloads),
-        Command::Get { url, out } => get::run(&url, out.as_deref()),
+            pin,
+        } => share::run(&file, &expires, encrypt, downloads, pin),
+        Command::Get { url, out, pin } => get::run(&url, out.as_deref(), pin.as_deref()),
         Command::Domain {
             action: DomainAction::Add { domain },
         } => domain::run(&domain),

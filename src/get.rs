@@ -8,28 +8,38 @@ use std::fs::File;
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
 
-pub fn run(url: &str, out: Option<&Path>) -> Result<()> {
+pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     let (base, fragment) = url.rsplit_once('#').ok_or_else(|| {
         anyhow!("this link has no key — it isn't a dove-encrypted share (nothing after `#`)")
     })?;
-    let key = crypto::key_from_fragment(fragment)?;
+    // The fragment carries a 32-byte secret. Without a PIN it *is* the key; with
+    // one, the key is PBKDF2(PIN, secret) — same derivation the browser runs.
+    let secret = crypto::key_from_fragment(fragment)?;
+    let key = match pin {
+        Some(p) => crypto::derive_key(p, &secret),
+        None => secret,
+    };
     let out_path = out
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(filename_from_url(base)));
 
     // A full-tier link is the browser page URL (`…/d/<id>/<name>`); the CLI
     // wants the gate's download endpoint (`…/dl/<id>`, which decrements + 302s).
-    // A simple-tier presigned URL is fetched as-is.
-    let fetch_url = to_download_url(base);
-    let resp = ureq::get(&fetch_url)
-        .call()
-        .map_err(|e| anyhow!("fetching the share failed: {}", transport_err(e)))?;
-    if resp.status() >= 300 {
-        bail!(
-            "the share link returned HTTP {} — it may have expired or been revoked",
-            resp.status()
-        );
+    // A simple-tier presigned URL is fetched as-is. The PIN rides a query param
+    // the gate checks (only on a gate link — never on a signed presigned URL).
+    let mut fetch_url = to_download_url(base);
+    if let Some(p) = pin {
+        if fetch_url.contains("/dl/") {
+            fetch_url.push_str(&format!("?pin={p}"));
+        }
     }
+    let resp = match ureq::get(&fetch_url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, resp)) => bail!("{}", gate_error(code, resp, pin.is_some())),
+        Err(e @ ureq::Error::Transport(_)) => {
+            bail!("fetching the share failed: {}", transport_err(e))
+        }
+    };
     let total: u64 = resp
         .header("Content-Length")
         .and_then(|s| s.parse().ok())
@@ -98,6 +108,29 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Turn a gate error status (+ its JSON body) into a message a recipient can act
+/// on: needs a PIN, wrong PIN with tries left, locked out, or gone.
+fn gate_error(code: u16, resp: ureq::Response, had_pin: bool) -> String {
+    let body = resp.into_string().unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    let attempts = json.get("attempts_remaining").and_then(|v| v.as_u64());
+    match code {
+        401 if !had_pin => {
+            "this share is PIN-locked — pass --pin <PIN> (the sender sent it separately)".into()
+        }
+        401 => match attempts {
+            Some(n) => format!(
+                "wrong PIN — {n} attempt{} left",
+                if n == 1 { "" } else { "s" }
+            ),
+            None => "wrong PIN".into(),
+        },
+        423 => "this share is locked — too many wrong PINs. Ask the sender to re-share.".into(),
+        410 => "this share has expired or reached its download limit".into(),
+        _ => format!("the share link returned HTTP {code} — it may have expired or been revoked"),
+    }
 }
 
 /// A short transport-error string that never echoes the (signed) request URL.
