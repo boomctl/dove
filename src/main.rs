@@ -49,9 +49,10 @@ enum Command {
         #[arg(long, default_value_t = 7)]
         expire_days: u32,
     },
-    /// Share a file: upload it and print a presigned link that auto-expires.
+    /// Share a file (or a directory, auto-zipped): upload it and print a
+    /// presigned link that auto-expires.
     Share {
-        /// The file to share.
+        /// The file or directory to share. A directory is zipped first.
         file: PathBuf,
         /// How long the link stays valid (≤ 7d): `3d`, `12h`, `30m`.
         #[arg(long, default_value = "3d")]
