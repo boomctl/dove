@@ -8,6 +8,7 @@
 
 mod config;
 mod crypto;
+mod domain;
 mod duration;
 mod gate;
 mod get;
@@ -78,6 +79,11 @@ enum Command {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Put a custom subdomain in front of the gate (CloudFront + ACM). Full tier.
+    Domain {
+        #[command(subcommand)]
+        action: DomainAction,
+    },
     /// List the shares currently in the bucket.
     Ls,
     /// Revoke a share early by its id, so its link 404s.
@@ -87,6 +93,16 @@ enum Command {
     },
     /// Show what's provisioned and whether the bucket is reachable.
     Status,
+}
+
+#[derive(Subcommand)]
+enum DomainAction {
+    /// Add a custom subdomain (e.g. share.dove.sh) — provisions the cert and
+    /// CloudFront, and prints the DNS records to add.
+    Add {
+        /// The subdomain to serve shares from.
+        domain: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -111,6 +127,9 @@ fn main() -> Result<()> {
             downloads,
         } => share::run(&file, &expires, encrypt, downloads),
         Command::Get { url, out } => get::run(&url, out.as_deref()),
+        Command::Domain {
+            action: DomainAction::Add { domain },
+        } => domain::run(&domain),
         Command::Ls => share::list(),
         Command::Revoke { id } => share::revoke(&id),
         Command::Status => share::status(),
