@@ -198,13 +198,29 @@ and decrypt. **The server still never sees the key or the PIN** — both are use
 only client-side — so the "infrastructure can't read the file" guarantee holds,
 now with a second factor on top.
 
-Notes and edges: the KDF must be slow enough that a short PIN isn't brute-forced
-offline against the ciphertext (Argon2 with sane parameters), which is the whole
-reason a 4–6 digit PIN is acceptable here; combine it with the access policy's
-download limit so a wrong-PIN attempt doesn't get unlimited tries against a
-live object. This is a **full-tier** feature — the simple tier has no
-client-side key to bind a PIN to. `dove share <file> --pin` (prompt for the PIN,
-never echo it; print the link and remind you to send the PIN separately).
+**The PIN is checked at the gate — which is what makes a short PIN safe.** A
+KDF-only PIN is offline-brute-forceable: once the ciphertext is fetched, a
+4-digit PIN is 10,000 guesses against the GCM tag, and a slow KDF buys minutes,
+not safety. So the PIN is verified **server-side at the access gate**, which
+stores a salted hash of it, rate-limits, and **locks after N wrong attempts**.
+The attacker can't obtain the ciphertext to attack offline, and can't keep
+guessing online — brute force is *prevented*, not merely slowed. This is the
+clean separation:
+
+- **PIN → rate-limited access.** The gate verifies it and locks out abuse. The
+  gate sees the PIN, but it never holds the fragment key, so it still **cannot
+  decrypt** — a compromised gate with the PIN reads nothing.
+- **Fragment key → confidentiality.** Never leaves the client. E2E is intact.
+
+Strongest form does both: the PIN gates the fetch (the primary, brute-force-proof
+defense) **and** is folded into the KDF (`key = KDF(fragment_secret, PIN)`), so
+if a ciphertext ever leaks past the gate it's still PIN-locked — the slow KDF as
+the second line, not the only line.
+
+This is a **full-tier** feature — the simple tier has no gate and no client-side
+key to bind a PIN to. `dove share <file> --pin` prompts for the PIN (never
+echoed), prints the link, and reminds you to send the PIN over a separate
+channel.
 
 ## Custom domain (post-provision, opt-in)
 
