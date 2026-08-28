@@ -456,7 +456,7 @@ const BUCKET_CORS: &str = r#"{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMetho
 /// one bucket. Nothing else.
 pub fn gate_role_policy(account: &str, region: &str, table: &str, bucket: &str) -> String {
     format!(
-        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:*:{account}:*"}},{{"Effect":"Allow","Action":"dynamodb:UpdateItem","Resource":"arn:aws:dynamodb:{region}:{account}:table/{table}"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::{bucket}/*"}}]}}"#
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:*:{account}:*"}},{{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":"arn:aws:dynamodb:{region}:{account}:table/{table}"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::{bucket}/*"}}]}}"#
     )
 }
 
@@ -669,6 +669,7 @@ mod tests {
     #[test]
     fn gate_role_policy_scopes_to_the_one_table_and_bucket() {
         let p = gate_role_policy("123", "us-east-1", "dove-shares-123", "dove-shares-123");
+        assert!(p.contains("dynamodb:GetItem")); // /meta + /dl read the item
         assert!(p.contains("dynamodb:UpdateItem"));
         assert!(p.contains("arn:aws:dynamodb:us-east-1:123:table/dove-shares-123"));
         assert!(p.contains("s3:GetObject"));
