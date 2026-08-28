@@ -343,8 +343,22 @@ fn provision_full(
             "cannot be assumed",
             6,
         )?;
-        // Always push the latest gate code + page (a re-provision updates them).
-        // A just-created function may still be settling, so retry "in progress".
+        // A freshly created function is 'Pending'/'Creating' and rejects code
+        // updates until it's Active. Wait for that (best-effort — the retry below
+        // is the real guard), then push the latest gate code + page. On a re-
+        // provision this updates an existing function; on a fresh create it's a
+        // no-op redeploy of the same code. The "cannot be performed at this time"
+        // message covers every not-ready state (Creating / Pending / InProgress).
+        let _ = aws(
+            profile,
+            &[
+                "lambda",
+                "wait",
+                "function-active-v2",
+                "--function-name",
+                &name,
+            ],
+        );
         aws_retry(
             profile,
             &[
@@ -356,9 +370,21 @@ fn provision_full(
                 &zip_arg,
             ],
             &[],
-            "progress",
-            6,
-        )
+            "cannot be performed at this time",
+            10,
+        )?;
+        // Let the code update settle before the URL/permission steps touch it.
+        let _ = aws(
+            profile,
+            &[
+                "lambda",
+                "wait",
+                "function-updated-v2",
+                "--function-name",
+                &name,
+            ],
+        );
+        Ok(())
     });
     let _ = std::fs::remove_file(&zip);
     lambda_result?;
