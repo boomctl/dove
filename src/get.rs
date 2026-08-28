@@ -17,7 +17,11 @@ pub fn run(url: &str, out: Option<&Path>) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(filename_from_url(base)));
 
-    let resp = ureq::get(base)
+    // A full-tier link is the browser page URL (`…/d/<id>/<name>`); the CLI
+    // wants the gate's download endpoint (`…/dl/<id>`, which decrements + 302s).
+    // A simple-tier presigned URL is fetched as-is.
+    let fetch_url = to_download_url(base);
+    let resp = ureq::get(&fetch_url)
         .call()
         .map_err(|e| anyhow!("fetching the share failed: {}", transport_err(e)))?;
     if resp.status() >= 300 {
@@ -57,6 +61,24 @@ fn filename_from_url(base: &str) -> String {
     } else {
         decoded
     }
+}
+
+/// Turn a full-tier page URL (`scheme://host/d/<id>/<name>`) into the gate's
+/// download endpoint (`scheme://host/dl/<id>`). Any other URL (e.g. a simple-tier
+/// presigned URL) is returned unchanged.
+fn to_download_url(base: &str) -> String {
+    if let Some(scheme_end) = base.find("://") {
+        let after = &base[scheme_end + 3..];
+        if let Some(slash) = after.find('/') {
+            let host = &base[..scheme_end + 3 + slash];
+            let path = after[slash..].split('?').next().unwrap_or("");
+            let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            if segs.len() >= 2 && segs[0] == "d" {
+                return format!("{host}/dl/{}", segs[1]);
+            }
+        }
+    }
+    base.to_string()
 }
 
 /// Minimal percent-decoding for a URL path segment (`%20` → space, etc.).
@@ -105,6 +127,17 @@ impl<R: Read> Read for CountingReader<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_download_url_maps_gate_page_to_dl_endpoint() {
+        assert_eq!(
+            to_download_url("https://abc.lambda-url.us-east-1.on.aws/d/8f3a/report.pdf"),
+            "https://abc.lambda-url.us-east-1.on.aws/dl/8f3a"
+        );
+        // A simple-tier presigned URL is untouched.
+        let presigned = "https://b.s3.amazonaws.com/ab12/report.pdf?X-Amz-Sig=x";
+        assert_eq!(to_download_url(presigned), presigned);
+    }
 
     #[test]
     fn filename_from_url_takes_last_segment_and_decodes() {

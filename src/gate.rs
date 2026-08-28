@@ -15,6 +15,11 @@ use zip::ZipWriter;
 /// no external files or build step.
 pub const SOURCE: &str = include_str!("../assets/gate.py");
 
+/// The self-contained share/decryptor page (built from dove-site), served by
+/// the gate to browsers. Regenerate with: build dove-site, then copy
+/// `dist/share/index.html` to `assets/share.html`.
+pub const PAGE: &str = include_str!("../assets/share.html");
+
 /// The Lambda handler entrypoint: file `lambda_function.py`, function `handler`.
 pub const HANDLER: &str = "lambda_function.handler";
 /// The Lambda runtime the gate targets.
@@ -27,6 +32,8 @@ pub fn write_deployment_zip(dest: &Path) -> Result<()> {
     let mut zip = ZipWriter::new(file);
     zip.start_file("lambda_function.py", SimpleFileOptions::default())?;
     zip.write_all(SOURCE.as_bytes())?;
+    zip.start_file("share.html", SimpleFileOptions::default())?;
+    zip.write_all(PAGE.as_bytes())?;
     zip.finish()?;
     Ok(())
 }

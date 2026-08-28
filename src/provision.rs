@@ -226,6 +226,23 @@ fn provision_full(
     let table = bucket.to_string(); // same name as the bucket, different namespace
     let name = format!("dove-gate-{account}"); // role + lambda share this name
 
+    // Bucket CORS so the browser decryptor can read the ciphertext from the
+    // presigned URL cross-origin (the gate 302s to S3; the fetch is cross-site).
+    ui::step("bucket CORS", || {
+        aws_ok(
+            profile,
+            &[
+                "s3api",
+                "put-bucket-cors",
+                "--bucket",
+                bucket,
+                "--cors-configuration",
+                BUCKET_CORS,
+            ],
+            &[],
+        )
+    })?;
+
     // DynamoDB table with TTL on expires_at (auto-cleanup of dead policies).
     ui::step("dynamodb table", || {
         aws_ok(
@@ -325,6 +342,22 @@ fn provision_full(
             &["ResourceConflictException"],
             "cannot be assumed",
             6,
+        )?;
+        // Always push the latest gate code + page (a re-provision updates them).
+        // A just-created function may still be settling, so retry "in progress".
+        aws_retry(
+            profile,
+            &[
+                "lambda",
+                "update-function-code",
+                "--function-name",
+                &name,
+                "--zip-file",
+                &zip_arg,
+            ],
+            &[],
+            "progress",
+            6,
         )
     });
     let _ = std::fs::remove_file(&zip);
@@ -388,6 +421,10 @@ fn provision_full(
 
 /// Trust policy letting Lambda assume the gate's role.
 const LAMBDA_TRUST: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+
+/// Bucket CORS: let any origin GET (the browser decryptor fetching ciphertext
+/// from the presigned URL). Reads are still gated by the presign + the gate.
+const BUCKET_CORS: &str = r#"{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMethods":["GET"],"AllowedHeaders":["*"],"MaxAgeSeconds":3000}]}"#;
 
 /// The gate role's inline policy: log, decrement the one table, presign from the
 /// one bucket. Nothing else.
