@@ -16,7 +16,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Added as the implementation lands, per docs/designs/dove-v1.md.
+aes-gcm = "0.10"
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }

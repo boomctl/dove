@@ -7,6 +7,7 @@
 //! https://dove.sh
 
 mod config;
+mod crypto;
 mod duration;
 mod provision;
 mod s3;
