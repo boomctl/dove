@@ -323,15 +323,36 @@ fn provision_full(
     })?;
 
     // The gate secret — the HMAC key that mints/verifies unforgeable share ids.
-    // Stable across re-provision (generated once, kept in secrets.toml).
+    // Stable across re-provision (generated once, kept in secrets.toml). Stored in
+    // SSM as a SecureString (encrypted, not readable from the function config);
+    // the Lambda reads it at cold start. The env carries only the parameter name.
     let gate_secret = ensure_gate_secret()?;
+    let secret_param = format!("/dove/{bucket}/gate-secret");
+    ui::step("gate secret (SSM)", || {
+        aws_ok(
+            profile,
+            &[
+                "ssm",
+                "put-parameter",
+                "--name",
+                &secret_param,
+                "--value",
+                &gate_secret,
+                "--type",
+                "SecureString",
+                "--overwrite",
+            ],
+            &[],
+        )
+    })?;
 
     // The gate Lambda. A freshly-created role isn't assumable for a few seconds,
     // so retry create-function on that specific error.
     let zip = temp_path("zip");
     crate::gate::write_deployment_zip(&zip)?;
     let zip_arg = format!("fileb://{}", zip.display());
-    let env = format!("Variables={{BUCKET={bucket},TABLE={table},GATE_SECRET={gate_secret}}}");
+    let env =
+        format!("Variables={{BUCKET={bucket},TABLE={table},GATE_SECRET_PARAM={secret_param}}}");
     let lambda_result = ui::step("gate Lambda", || {
         aws_retry(
             profile,
@@ -398,7 +419,7 @@ fn provision_full(
                 &name,
             ],
         );
-        // Set the env (BUCKET/TABLE/GATE_SECRET) — a fresh create already has it,
+        // Set the env (BUCKET/TABLE/GATE_SECRET_PARAM) — a fresh create already has it,
         // but a re-provision of an existing function needs it applied here.
         aws_retry(
             profile,
@@ -476,7 +497,7 @@ const BUCKET_CORS: &str = r#"{"CORSRules":[{"AllowedOrigins":["*"],"AllowedMetho
 /// one bucket. Nothing else.
 pub fn gate_role_policy(account: &str, region: &str, table: &str, bucket: &str) -> String {
     format!(
-        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:*:{account}:*"}},{{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":"arn:aws:dynamodb:{region}:{account}:table/{table}"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::{bucket}/*"}}]}}"#
+        r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:*:{account}:*"}},{{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":"arn:aws:dynamodb:{region}:{account}:table/{table}"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::{bucket}/*"}},{{"Effect":"Allow","Action":"ssm:GetParameter","Resource":"arn:aws:ssm:{region}:{account}:parameter/dove/{bucket}/gate-secret"}},{{"Effect":"Allow","Action":"kms:Decrypt","Resource":"*"}}]}}"#
     )
 }
 
@@ -684,6 +705,9 @@ mod tests {
         assert!(p.contains("s3:GetObject"));
         assert!(p.contains("arn:aws:s3:::dove-shares-123/*"));
         assert!(p.contains("logs:PutLogEvents"));
+        assert!(p.contains("ssm:GetParameter")); // reads the gate secret from SSM
+        assert!(p.contains("parameter/dove/dove-shares-123/gate-secret"));
+        assert!(p.contains("kms:Decrypt"));
     }
 
     #[test]

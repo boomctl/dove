@@ -24,9 +24,6 @@ import boto3
 
 BUCKET = os.environ["BUCKET"]
 TABLE = os.environ["TABLE"]
-# HMAC key for share ids. Present once provisioned; when absent (not yet
-# configured) id verification is skipped so the gate still serves.
-GATE_SECRET = bytes.fromhex(os.environ["GATE_SECRET"]) if os.environ.get("GATE_SECRET") else None
 
 # Wrong-PIN guesses allowed before the share locks. Small, because the gate
 # checks online — a handful of tries against a 6-digit PIN is negligible odds,
@@ -35,6 +32,25 @@ MAX_PIN_ATTEMPTS = 5
 
 _ddb = boto3.client("dynamodb")
 _s3 = boto3.client("s3")
+_ssm = boto3.client("ssm")
+
+
+def _load_gate_secret():
+    """The HMAC key for share ids: from SSM SecureString (GATE_SECRET_PARAM) —
+    read once at cold start, never in the function config. Falls back to a direct
+    GATE_SECRET env var for legacy deploys. None → id verification is skipped."""
+    name = os.environ.get("GATE_SECRET_PARAM")
+    if name:
+        try:
+            value = _ssm.get_parameter(Name=name, WithDecryption=True)["Parameter"]["Value"]
+            return bytes.fromhex(value)
+        except Exception:  # noqa: BLE001
+            return None
+    raw = os.environ.get("GATE_SECRET")
+    return bytes.fromhex(raw) if raw else None
+
+
+GATE_SECRET = _load_gate_secret()
 PAGE = (Path(__file__).parent / "share.html").read_text()
 # The link-preview image messaging apps show when a share link is pasted. Generic
 # and branded — it can't reveal the filename (that's E2E), which is the point.
