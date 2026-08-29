@@ -20,7 +20,7 @@ path = "src/main.rs"
 # shares).
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-dove-core = { path = "../dove-core", version = "0.1.0" }
+dove-core = "0.1.0"
 getrandom = "0.2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
