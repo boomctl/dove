@@ -14,6 +14,7 @@ mod crypto;
 mod domain;
 mod duration;
 mod gate;
+mod gatectl;
 mod get;
 mod ledger;
 mod provision;
@@ -105,6 +106,12 @@ enum Command {
         #[command(subcommand)]
         action: DomainAction,
     },
+    /// Manually disable/enable the gate — a panic switch. The cost breaker does
+    /// this automatically on a flood; this is the manual lever.
+    Gate {
+        #[command(subcommand)]
+        action: GateAction,
+    },
     /// List the shares currently in the bucket.
     Ls,
     /// Revoke a share early by its id, so its link 404s.
@@ -124,6 +131,16 @@ enum DomainAction {
         /// The subdomain to serve shares from.
         domain: String,
     },
+}
+
+#[derive(Subcommand)]
+enum GateAction {
+    /// Take the gate offline: requests fail fast, at no cost.
+    Disable,
+    /// Bring the gate back online.
+    Enable,
+    /// Show whether the gate is enabled or disabled.
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -154,6 +171,11 @@ fn main() -> Result<()> {
         Command::Domain {
             action: DomainAction::Add { domain },
         } => domain::run(&domain),
+        Command::Gate { action } => match action {
+            GateAction::Disable => gatectl::disable(),
+            GateAction::Enable => gatectl::enable(),
+            GateAction::Status => gatectl::status(),
+        },
         Command::Ls => share::list(),
         Command::Revoke { id } => share::revoke(&id),
         Command::Status => share::status(),
