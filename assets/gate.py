@@ -12,6 +12,7 @@ It never sees the decryption key — that rides the URL fragment, which browsers
 and HTTP clients never send. Environment: BUCKET, TABLE.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -31,6 +32,9 @@ MAX_PIN_ATTEMPTS = 5
 _ddb = boto3.client("dynamodb")
 _s3 = boto3.client("s3")
 PAGE = (Path(__file__).parent / "share.html").read_text()
+# The link-preview image messaging apps show when a share link is pasted. Generic
+# and branded — it can't reveal the filename (that's E2E), which is the point.
+OG_PNG = (Path(__file__).parent / "og.png").read_bytes()
 
 
 def _resp(status, body="", content_type="text/plain; charset=utf-8", extra=None):
@@ -40,16 +44,33 @@ def _resp(status, body="", content_type="text/plain; charset=utf-8", extra=None)
     return {"statusCode": status, "headers": headers, "body": body}
 
 
+def _origin(event):
+    """This gate's own reachable origin, for absolute og:image / og:url."""
+    dom = event.get("requestContext", {}).get("domainName", "")
+    return f"https://{dom}" if dom else ""
+
+
 def handler(event, _context):
-    parts = [p for p in event.get("rawPath", "").split("/") if p]
+    raw = event.get("rawPath", "")
+    if raw == "/og.png":
+        # Binary link-preview image (unfurlers fetch this via og:image).
+        return {
+            "statusCode": 200,
+            "headers": {"content-type": "image/png", "cache-control": "public, max-age=86400"},
+            "body": base64.b64encode(OG_PNG).decode(),
+            "isBase64Encoded": True,
+        }
+    parts = [p for p in raw.split("/") if p]
     if len(parts) < 2:
         return _resp(404, "not a dove share link")
     route, share_id = parts[0], parts[1]
 
     if route == "d":
         # The decryptor page. No decrement — opening a link (or an unfurler
-        # previewing it) never spends a download.
-        return _resp(200, PAGE, "text/html; charset=utf-8")
+        # previewing it) never spends a download. Inject this gate's origin so the
+        # og:image / og:url are absolute (unfurlers require it).
+        page = PAGE.replace("__OGBASE__", _origin(event))
+        return _resp(200, page, "text/html; charset=utf-8")
 
     if route == "meta":
         return _meta(share_id)

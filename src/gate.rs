@@ -20,6 +20,9 @@ pub const SOURCE: &str = include_str!("../assets/gate.py");
 /// `dist/share/index.html` to `assets/share.html`.
 pub const PAGE: &str = include_str!("../assets/share.html");
 
+/// The link-preview image, shipped in the Lambda zip and served at `/og.png`.
+pub const OG_PNG: &[u8] = include_bytes!("../assets/og.png");
+
 /// The Lambda handler entrypoint: file `lambda_function.py`, function `handler`.
 pub const HANDLER: &str = "lambda_function.handler";
 /// The Lambda runtime the gate targets.
@@ -34,6 +37,8 @@ pub fn write_deployment_zip(dest: &Path) -> Result<()> {
     zip.write_all(SOURCE.as_bytes())?;
     zip.start_file("share.html", SimpleFileOptions::default())?;
     zip.write_all(PAGE.as_bytes())?;
+    zip.start_file("og.png", SimpleFileOptions::default())?;
+    zip.write_all(OG_PNG)?;
     zip.finish()?;
     Ok(())
 }
