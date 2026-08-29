@@ -3,9 +3,9 @@
 //! bar, the size, the URL, and a quiet "expires in …" line.
 
 use crate::config::Config;
-use crate::s3::Store;
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
+use dove_core::s3::Store;
 use dove_core::{crypto, duration as dur};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
@@ -39,7 +39,7 @@ pub fn run(
              Provision it with `dove provision full`."
         );
     }
-    let store = Store::new(&cfg)?;
+    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
     let (source, name, zip_temp) = prepare_upload(path)?;
 
     if cfg.is_full() {
@@ -85,7 +85,9 @@ pub fn run(
     let object_key = share_key(&name);
     let size = std::fs::metadata(&upload)?.len();
     let bar = ui::Progress::new("uploading", size);
-    let uploaded = store.put_file(&object_key, &upload, |done| bar.set(done));
+    // TODO(dove-core extraction, later task): wire the real CLI progress bar
+    // through a `dove_core::progress::Progress` impl over `bar`; silent for now.
+    let uploaded = store.put_file(&object_key, &upload, &dove_core::progress::Silent);
     for t in [zip_temp, ct_temp].into_iter().flatten() {
         let _ = std::fs::remove_file(t);
     }
@@ -121,7 +123,7 @@ fn share_full(
 ) -> Result<()> {
     // A MAC'd share id: the gate rejects any id it didn't mint before touching
     // the database, so forged / random-id floods die at a cheap check.
-    let gate_secret = crate::secrets::Secrets::load()?
+    let gate_secret = dove_core::secrets::Secrets::load()?
         .gate_secret
         .ok_or_else(|| anyhow!("no gate secret in secrets.toml — re-run `dove provision full`"))?;
     let share_id = crypto::new_share_id(&gate_secret)?;
@@ -155,7 +157,9 @@ fn share_full(
     let object_key = share_id.clone(); // name-free: the filename is E2E, in the fragment
     let size = std::fs::metadata(&ct)?.len();
     let bar = ui::Progress::new("uploading", size);
-    let uploaded = store.put_file(&object_key, &ct, |done| bar.set(done));
+    // TODO(dove-core extraction, later task): wire the real CLI progress bar
+    // through a `dove_core::progress::Progress` impl over `bar`; silent for now.
+    let uploaded = store.put_file(&object_key, &ct, &dove_core::progress::Silent);
     for t in [zip_temp, Some(ct)].into_iter().flatten() {
         let _ = std::fs::remove_file(t);
     }
@@ -191,7 +195,7 @@ fn share_full(
 
     // Keep a local id → filename record so `dove ls` can show it (the server,
     // holding only a name-free key, can't). Best-effort; never fails the share.
-    let _ = crate::ledger::record(crate::ledger::ShareRecord {
+    let _ = dove_core::ledger::record(dove_core::ledger::ShareRecord {
         id: share_id.clone(),
         name: name.to_string(),
         from: from.clone(),
@@ -371,13 +375,14 @@ fn add_tree<W: Write + Seek>(
 /// id only: their filenames are end-to-end encrypted in the link, so the server
 /// (and therefore `ls`) genuinely doesn't have them.
 pub fn list() -> Result<()> {
-    let store = Store::new(&Config::load()?)?;
+    let cfg = Config::load()?;
+    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
     let keys = store.list("")?;
     if keys.is_empty() {
         eprintln!("no shares yet — `dove share <file>` to make one");
         return Ok(());
     }
-    let names = crate::ledger::names(); // local id → filename map
+    let names = dove_core::ledger::names(); // local id → filename map
     for key in keys {
         println!("{}", share_row(&key, &names));
     }
@@ -388,13 +393,14 @@ pub fn list() -> Result<()> {
 /// been reaped by the lifecycle rule anyway). Handles both name-free full-tier
 /// keys (`<id>`) and simple-tier keys (`<id>/<name>`).
 pub fn revoke(id: &str) -> Result<()> {
-    let store = Store::new(&Config::load()?)?;
+    let cfg = Config::load()?;
+    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
     let keys = store.list(id)?;
     let key = keys
         .first()
         .ok_or_else(|| anyhow!("no share with id {id}"))?;
     store.delete_object(key)?;
-    let _ = crate::ledger::remove(id);
+    let _ = dove_core::ledger::remove(id);
     println!("revoked {id} — the link now 404s");
     Ok(())
 }
@@ -407,7 +413,7 @@ pub fn status() -> Result<()> {
     if let Some(p) = &cfg.profile {
         println!("  {} {}", ui::dim("profile"), p);
     }
-    match Store::new(&cfg).and_then(|s| s.list("")) {
+    match Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref()).and_then(|s| s.list("")) {
         Ok(keys) => println!("  {} {}", ui::dim("shares "), keys.len()),
         Err(e) => eprintln!("  {} couldn't reach the bucket: {e:#}", ui::dim("shares ")),
     }

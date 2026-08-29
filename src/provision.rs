@@ -144,7 +144,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
     })?;
     // Mint a key only if we don't already have one — a re-provision reuses it
     // (an IAM user can hold at most two keys; don't orphan the old one).
-    if crate::secrets::Secrets::exists() {
+    if dove_core::secrets::Secrets::exists() {
         ui::step("access key (reusing)", || Ok(()))?;
     } else {
         ui::step("minting access key", || {
@@ -166,7 +166,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
                 );
             }
             let (id, secret) = parse_access_key(&out.stdout)?;
-            crate::secrets::Secrets {
+            dove_core::secrets::Secrets {
                 access_key_id: id,
                 secret_access_key: secret,
                 gate_secret: None,
@@ -476,7 +476,7 @@ fn provision_full(
 /// secrets.toml so `share` can mint ids and so it's stable across re-provision
 /// (regenerating it would invalidate every outstanding link).
 fn ensure_gate_secret() -> Result<String> {
-    let mut s = crate::secrets::Secrets::load()?;
+    let mut s = dove_core::secrets::Secrets::load()?;
     if let Some(g) = &s.gate_secret {
         return Ok(g.clone());
     }

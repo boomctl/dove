@@ -412,7 +412,13 @@ dependencies = [
  "getrandom",
  "hmac 0.12.1",
  "pbkdf2",
+ "rusty-s3",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
+ "thiserror",
+ "toml",
+ "ureq",
 ]
 
 [[package]]

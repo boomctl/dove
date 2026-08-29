@@ -14,10 +14,7 @@ mod domain;
 mod gate;
 mod gatectl;
 mod get;
-mod ledger;
 mod provision;
-mod s3;
-mod secrets;
 mod share;
 mod ui;
 
