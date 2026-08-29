@@ -4,7 +4,7 @@ All notable changes to `dove` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.0] - 2026-08-28
 
 The first working version — both tiers, end to end.
 
