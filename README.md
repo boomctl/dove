@@ -22,6 +22,10 @@ access as you allow, then forget.
 The full v1 design — architecture, encryption, threat model — is written up in
 [docs/designs/dove-v1.md](docs/designs/dove-v1.md).
 
+Open-source ergonomics and feature work is tracked in the agent-ready
+[OSS build list](docs/BUILD_LIST.md). It intentionally excludes hosted-service and
+desktop-product plans.
+
 ## Two tiers
 
 - **Simple** — just a bucket. `dove share f --expires 5d` uploads, prints a
