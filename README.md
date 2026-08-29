@@ -69,17 +69,18 @@ enforce *how many times / how long* — never *what*. See
 
 ## Install
 
-**Homebrew** (macOS + Linux):
+**macOS / Linux** — the installer script, or Homebrew:
 
 ```sh
-brew install boomctl/tap/dove
+curl -fsSL https://raw.githubusercontent.com/boomctl/dove/main/install.sh | sh
+# or:  brew install boomctl/tap/dove
 ```
 
-**Scoop** (Windows):
+**Windows** — PowerShell, or Scoop:
 
-```sh
-scoop bucket add boomctl https://github.com/boomctl/scoop-bucket
-scoop install dove
+```powershell
+irm https://raw.githubusercontent.com/boomctl/dove/main/install.ps1 | iex
+# or:  scoop bucket add boomctl https://github.com/boomctl/scoop-bucket; scoop install dove
 ```
 
 **From source** — needs [Rust](https://rustup.rs) and the
