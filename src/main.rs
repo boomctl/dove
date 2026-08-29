@@ -13,6 +13,7 @@ mod get;
 mod provision;
 mod share;
 mod ui;
+mod usecmd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -112,6 +113,12 @@ enum Command {
     },
     /// Show what's provisioned and whether the bucket is reachable.
     Status,
+    /// Switch the active backend.
+    Use {
+        /// The backend name (as shown by `dove provision`, or a future `dove
+        /// backend add`).
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -170,5 +177,6 @@ fn main() -> Result<()> {
         Command::Ls => share::list(),
         Command::Revoke { id } => share::revoke(&id),
         Command::Status => share::status(),
+        Command::Use { name } => usecmd::run(&name),
     }
 }

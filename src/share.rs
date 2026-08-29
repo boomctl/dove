@@ -3,17 +3,20 @@
 //! size, the URL, and a quiet "expires in …" line.
 //!
 //! The actual share logic (both the simple-tier presigned-URL path and the
-//! full-tier gated/encrypted path) lives in `dove_core::backend::SelfHosted`
-//! — this module just resolves what to upload (zipping a directory if
-//! needed), asks the active backend to share it, and renders the result.
+//! full-tier gated/encrypted path) lives behind the `Transfer` seam — today
+//! that's `dove_core::backend::SelfHosted`, reached via
+//! `dove_core::resolve(&Registry)` (the plugin-aware factory) rather than
+//! constructed directly. This module just resolves what to upload (zipping a
+//! directory if needed), asks the active backend to share it, and renders the
+//! result.
 
 use crate::cli_progress::CliProgress;
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
 use dove_core::config::Registry;
+use dove_core::duration as dur;
 use dove_core::s3::Store;
-use dove_core::transfer::{ShareInfo, ShareRequest, Transfer};
-use dove_core::{backend::SelfHosted, duration as dur};
+use dove_core::transfer::{ShareInfo, ShareRequest};
 use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
@@ -63,7 +66,7 @@ pub fn run(
 
     let (upload_path, zip_temp) = prepare_upload(path)?;
 
-    let backend = SelfHosted::from_backend(registry.active_backend()?)?;
+    let backend = dove_core::resolve(&registry)?;
     let progress = CliProgress::new("uploading");
     let req = ShareRequest {
         path: upload_path,
@@ -193,7 +196,7 @@ fn add_tree<W: Write + Seek>(
 /// local-ledger lookup) lives in `dove_core::backend::SelfHosted::list`; this just
 /// renders it.
 pub fn list() -> Result<()> {
-    let backend = SelfHosted::from_backend(Registry::load()?.active_backend()?)?;
+    let backend = dove_core::resolve(&Registry::load()?)?;
     let shares = backend.list()?;
     if shares.is_empty() {
         eprintln!("no shares yet — `dove share <file>` to make one");
@@ -210,17 +213,27 @@ pub fn list() -> Result<()> {
 /// keys (`<id>`) and simple-tier keys (`<id>/<name>`) — resolved by
 /// `dove_core::backend::SelfHosted::revoke`.
 pub fn revoke(id: &str) -> Result<()> {
-    let backend = SelfHosted::from_backend(Registry::load()?.active_backend()?)?;
+    let backend = dove_core::resolve(&Registry::load()?)?;
     backend.revoke(id)?;
     println!("revoked {id} — the link now 404s");
     Ok(())
 }
 
-/// `dove status` — what's provisioned, and whether the bucket is reachable.
+/// `dove status` — leads with the active backend (name + its
+/// `BackendStatus.summary`, resolved through `dove_core::resolve` — the same
+/// seam `share`/`ls`/`revoke` go through, so `status` no longer bypasses the
+/// backend), then whatever else was already printed below: profile and
+/// bucket reachability.
 pub fn status() -> Result<()> {
-    let cfg = Registry::load()?.active_self_hosted()?;
-    println!("  {} {}", ui::dim("bucket "), cfg.bucket);
-    println!("  {} {}", ui::dim("region "), cfg.region);
+    let registry = Registry::load()?;
+    let backend_status = dove_core::resolve(&registry)?.status()?;
+    let mut header = format!("sending from {}", ui::bold(&registry.active));
+    for (label, value) in &backend_status.summary {
+        header.push_str(&format!(" · {label} {value}"));
+    }
+    println!("  {header}");
+
+    let cfg = registry.active_self_hosted()?;
     if let Some(p) = &cfg.profile {
         println!("  {} {}", ui::dim("profile"), p);
     }
