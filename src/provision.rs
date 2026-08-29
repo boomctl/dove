@@ -189,6 +189,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         endpoint: None,
         table,
         gate_url: gate_url.clone(),
+        distribution_id: None,
     }
     .save()?;
 

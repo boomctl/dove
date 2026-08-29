@@ -20,6 +20,8 @@ pub fn run(
     encrypt: bool,
     downloads: Option<u32>,
     pin: Option<String>,
+    from: Option<String>,
+    message: Option<String>,
 ) -> Result<()> {
     let ttl = dur::parse(expires)?;
     // Fail fast if not provisioned, before we spend time zipping/encrypting.
@@ -28,6 +30,12 @@ pub fn run(
         bail!(
             "--pin is a full-tier feature: it's checked at the gate, which the simple tier \
              doesn't have. Provision it with `dove provision full`."
+        );
+    }
+    if (from.is_some() || message.is_some()) && !cfg.is_full() {
+        bail!(
+            "--from/--message ride an encrypted metadata blob in the full-tier link. \
+             Provision it with `dove provision full`."
         );
     }
     let store = Store::new(&cfg)?;
@@ -42,6 +50,8 @@ pub fn run(
             ttl,
             downloads.unwrap_or(100),
             pin,
+            from,
+            message,
             zip_temp,
         );
     }
@@ -92,8 +102,9 @@ pub fn run(
 }
 
 /// Full tier: always encrypt, register a download policy in DynamoDB, and hand
-/// out a gate link (`<gate>/d/<id>/<name>#key`) instead of a raw presigned URL.
-/// The gate enforces the budget; the key still rides the fragment.
+/// out a gate link (`<gate>/d/<id>#<secret>.<meta>`). The gate enforces the
+/// budget; the key **and** the filename + trust metadata ride the fragment, so
+/// the server sees neither the content nor the real filename.
 #[allow(clippy::too_many_arguments)]
 fn share_full(
     cfg: &Config,
@@ -103,6 +114,8 @@ fn share_full(
     ttl: Duration,
     downloads: u32,
     pin: Option<String>,
+    from: Option<String>,
+    message: Option<String>,
     zip_temp: Option<PathBuf>,
 ) -> Result<()> {
     let share_id = random_id();
@@ -133,7 +146,7 @@ fn share_full(
         crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
     })?;
 
-    let object_key = format!("{share_id}/{name}");
+    let object_key = share_id.clone(); // name-free: the filename is E2E, in the fragment
     let size = std::fs::metadata(&ct)?.len();
     let bar = ui::Progress::new("uploading", size);
     let uploaded = store.put_file(&object_key, &ct, |done| bar.set(done));
@@ -144,6 +157,16 @@ fn share_full(
     bar.finish();
     ui::status("uploaded", &ui::human_size(size));
 
+    // The filename + trust (sender name, message) ride the fragment, encrypted
+    // with the secret — the server never sees them. Shown pre-PIN by the page.
+    let meta_json = serde_json::json!({
+        "name": name,
+        "from": from.as_deref().unwrap_or(""),
+        "msg": message.as_deref().unwrap_or(""),
+    })
+    .to_string();
+    let meta_blob = crypto::encrypt_meta(&fragment_secret, meta_json.as_bytes());
+
     let expires_at = now_epoch() + ttl.as_secs();
     ui::step("registering policy", || {
         put_policy_item(
@@ -152,18 +175,30 @@ fn share_full(
             &object_key,
             downloads,
             expires_at,
+            size,
             pin_hash.as_deref(),
         )
     })?;
+
+    // Keep a local id → filename record so `dove ls` can show it (the server,
+    // holding only a name-free key, can't). Best-effort; never fails the share.
+    let _ = crate::ledger::record(crate::ledger::ShareRecord {
+        id: share_id.clone(),
+        name: name.to_string(),
+        from: from.clone(),
+        created_at: now_epoch(),
+        expires_at,
+        downloads,
+    });
 
     let gate = cfg
         .gate_url
         .as_ref()
         .ok_or_else(|| anyhow!("no gate URL in config"))?;
     let url = format!(
-        "{gate}/d/{share_id}/{}#{}",
-        percent_encode(name),
-        crypto::key_to_fragment(&fragment_secret)
+        "{gate}/d/{share_id}#{}.{}",
+        crypto::key_to_fragment(&fragment_secret),
+        meta_blob
     );
     let plural = if downloads == 1 { "" } else { "s" };
     ui::share_result(
@@ -194,12 +229,15 @@ fn put_policy_item(
     s3_key: &str,
     downloads: u32,
     expires_at: u64,
+    size: u64,
     pin_hash: Option<&str>,
 ) -> Result<()> {
     let table = cfg
         .table
         .as_ref()
         .ok_or_else(|| anyhow!("no table in config"))?;
+    // `size` is stored so /meta reads it from DynamoDB instead of a per-request
+    // S3 HeadObject (cheaper, and one fewer thing the gate touches).
     let mut item = serde_json::json!({
         "id": {"S": id},
         "s3_key": {"S": s3_key},
@@ -207,6 +245,7 @@ fn put_policy_item(
         "downloads_total": {"N": downloads.to_string()},
         "expires_at": {"N": expires_at.to_string()},
         "created_at": {"N": now_epoch().to_string()},
+        "size": {"N": size.to_string()},
     });
     if let Some(hash) = pin_hash {
         // pin_attempts starts at 0; the gate increments on each wrong guess and
@@ -252,19 +291,6 @@ fn random_id() -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Percent-encode a filename for a URL path segment (`dove get` decodes it).
-fn percent_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod full_tests {
     use super::*;
@@ -275,13 +301,6 @@ mod full_tests {
         assert_eq!(a.len(), 16);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, random_id());
-    }
-
-    #[test]
-    fn percent_encode_escapes_spaces_and_specials() {
-        assert_eq!(percent_encode("q3 report.pdf"), "q3%20report.pdf");
-        assert_eq!(percent_encode("a+b&c"), "a%2Bb%26c");
-        assert_eq!(percent_encode("plain.txt"), "plain.txt");
     }
 }
 
@@ -357,7 +376,9 @@ fn add_tree<W: Write + Seek>(
     Ok(())
 }
 
-/// `dove ls` — the shares currently in the bucket (filename + share id).
+/// `dove ls` — the shares currently in the bucket. Full-tier shares are listed by
+/// id only: their filenames are end-to-end encrypted in the link, so the server
+/// (and therefore `ls`) genuinely doesn't have them.
 pub fn list() -> Result<()> {
     let store = Store::new(&Config::load()?)?;
     let keys = store.list("")?;
@@ -365,23 +386,25 @@ pub fn list() -> Result<()> {
         eprintln!("no shares yet — `dove share <file>` to make one");
         return Ok(());
     }
+    let names = crate::ledger::names(); // local id → filename map
     for key in keys {
-        println!("{}", share_row(&key));
+        println!("{}", share_row(&key, &names));
     }
     Ok(())
 }
 
 /// `dove revoke <id>` — delete a share early, so its link 404s (it would have
-/// been reaped by the lifecycle rule anyway).
+/// been reaped by the lifecycle rule anyway). Handles both name-free full-tier
+/// keys (`<id>`) and simple-tier keys (`<id>/<name>`).
 pub fn revoke(id: &str) -> Result<()> {
     let store = Store::new(&Config::load()?)?;
-    let keys = store.list(&format!("{id}/"))?;
+    let keys = store.list(id)?;
     let key = keys
         .first()
         .ok_or_else(|| anyhow!("no share with id {id}"))?;
     store.delete_object(key)?;
-    let name = key.split_once('/').map(|(_, n)| n).unwrap_or(key);
-    println!("revoked {name} ({id}) — the link now 404s");
+    let _ = crate::ledger::remove(id);
+    println!("revoked {id} — the link now 404s");
     Ok(())
 }
 
@@ -400,11 +423,16 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// One `ls` row: filename then the dim share id. Pure, so it's testable.
-fn share_row(key: &str) -> String {
+/// One `ls` row: filename then the dim share id. The filename comes from the key
+/// itself for simple-tier shares (`<id>/<name>`), or from the local ledger for
+/// full-tier name-free keys (`<id>`). Pure, so it's testable.
+fn share_row(key: &str, names: &std::collections::HashMap<String, String>) -> String {
     match key.split_once('/') {
         Some((id, name)) => format!("  {}  {}", name, ui::dim(id)),
-        None => format!("  {key}"),
+        None => match names.get(key) {
+            Some(name) => format!("  {}  {}", name, ui::dim(key)),
+            None => format!("  {}  {}", ui::dim("(encrypted name)"), ui::dim(key)),
+        },
     }
 }
 
@@ -436,9 +464,26 @@ mod tests {
 
     #[test]
     fn share_row_shows_name_and_id() {
-        let row = share_row("ab12cd34/report.pdf");
-        assert!(row.contains("report.pdf"), "{row}");
-        assert!(row.contains("ab12cd34"), "{row}");
+        use std::collections::HashMap;
+        // simple-tier key: filename comes from the key itself
+        let row = share_row("ab12cd34/report.pdf", &HashMap::new());
+        assert!(
+            row.contains("report.pdf") && row.contains("ab12cd34"),
+            "{row}"
+        );
+        // full-tier name-free key: filename comes from the local ledger
+        let names = HashMap::from([("890ad620f2c0b442".to_string(), "vault.txt".to_string())]);
+        let row = share_row("890ad620f2c0b442", &names);
+        assert!(
+            row.contains("vault.txt") && row.contains("890ad620f2c0b442"),
+            "{row}"
+        );
+        // unknown id → placeholder, still shows the id
+        let row = share_row("deadbeefdeadbeef", &HashMap::new());
+        assert!(
+            row.contains("encrypted name") && row.contains("deadbeef"),
+            "{row}"
+        );
     }
 
     #[test]

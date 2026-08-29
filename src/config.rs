@@ -23,11 +23,16 @@ pub struct Config {
     /// DynamoDB table holding share policies — full tier only.
     #[serde(default)]
     pub table: Option<String>,
-    /// The access-gate base URL (a Lambda Function URL). Its presence marks the
-    /// config as full-tier: `share` registers a policy and points links at the
-    /// gate instead of handing out a raw presigned URL.
+    /// The access-gate base URL. Its presence marks the config as full-tier:
+    /// `share` registers a policy and points links at the gate instead of a raw
+    /// presigned URL. This is the CloudFront domain (or a custom domain), which
+    /// signs requests to the IAM-private Lambda Function URL behind it.
     #[serde(default)]
     pub gate_url: Option<String>,
+    /// The CloudFront distribution fronting the gate (full tier). `domain add`
+    /// updates this distribution to attach a custom domain.
+    #[serde(default)]
+    pub distribution_id: Option<String>,
 }
 
 impl Config {
@@ -88,7 +93,8 @@ mod tests {
             profile: Some("work".into()),
             endpoint: None,
             table: Some("dove-shares-example".into()),
-            gate_url: Some("https://x.lambda-url.us-east-1.on.aws".into()),
+            gate_url: Some("https://share.example.com".into()),
+            distribution_id: Some("E123ABC".into()),
         };
         let text = toml::to_string(&cfg).unwrap();
         assert_eq!(Config::parse(&text).unwrap(), cfg);

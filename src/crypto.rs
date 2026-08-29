@@ -81,6 +81,49 @@ pub fn pin_hash(share_id: &str, pin: &str) -> String {
     hex_lower(&h.finalize())
 }
 
+/// Derive the key for the fragment's metadata blob (filename + trust) from the
+/// secret, domain-separated so it's independent of the file key. `SHA-256(secret
+/// ‖ "dove-meta-v1")` — a construction WebCrypto reproduces byte-for-byte.
+pub fn meta_key(secret: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(secret);
+    h.update(b"dove-meta-v1");
+    h.finalize().into()
+}
+
+/// Encrypt the metadata blob (filename + sender name + message) for the URL
+/// fragment: `base64url(nonce(12) ‖ AES-256-GCM(meta_key, plaintext))`. It rides
+/// the fragment, so the server never sees the real filename or the trust text.
+pub fn encrypt_meta(secret: &[u8; 32], plaintext: &[u8]) -> String {
+    let key = meta_key(secret);
+    let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte key");
+    let mut nonce = [0u8; 12];
+    getrandom::getrandom(&mut nonce).expect("OS RNG unavailable");
+    let ct = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .expect("metadata encryption");
+    let mut blob = nonce.to_vec();
+    blob.extend_from_slice(&ct);
+    URL_SAFE_NO_PAD.encode(blob)
+}
+
+/// Decrypt a metadata blob produced by `encrypt_meta` (or WebCrypto's equivalent).
+pub fn decrypt_meta(secret: &[u8; 32], blob_b64: &str) -> Result<Vec<u8>> {
+    let blob = URL_SAFE_NO_PAD
+        .decode(blob_b64.trim())
+        .map_err(|_| anyhow!("invalid metadata in the link"))?;
+    if blob.len() < 12 + 16 {
+        bail!("metadata in the link is too short");
+    }
+    let key = meta_key(secret);
+    let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte key");
+    let (nonce, ct) = blob.split_at(12);
+    cipher
+        .decrypt(Nonce::from_slice(nonce), ct)
+        .map_err(|_| anyhow!("metadata decryption failed"))
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -290,6 +333,22 @@ mod tests {
         assert_eq!(derive_key("4917", &frag), derive_key("4917", &frag));
         assert_ne!(derive_key("4917", &frag), derive_key("0000", &frag));
         assert_ne!(derive_key("4917", &frag), derive_key("4917", &[8u8; 32]));
+    }
+
+    #[test]
+    fn meta_round_trips_and_rejects_wrong_secret() {
+        let secret = [3u8; 32];
+        let plaintext = br#"{"name":"q3 report.pdf","from":"Alex","msg":"the codes"}"#;
+        let blob = encrypt_meta(&secret, plaintext);
+        assert_eq!(decrypt_meta(&secret, &blob).unwrap(), plaintext);
+        assert!(decrypt_meta(&[4u8; 32], &blob).is_err()); // wrong secret → fails
+                                                           // Emit a fixture so the browser (WebCrypto) decryptor can be cross-checked.
+        let fixture = serde_json::json!({
+            "secret_hex": hex_lower(&secret),
+            "blob_b64url": blob,
+            "plaintext": String::from_utf8_lossy(plaintext),
+        });
+        let _ = std::fs::write("/tmp/dove-meta-fixture.json", fixture.to_string());
     }
 
     #[test]

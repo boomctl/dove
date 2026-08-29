@@ -12,15 +12,31 @@ pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     let (base, fragment) = url.rsplit_once('#').ok_or_else(|| {
         anyhow!("this link has no key — it isn't a dove-encrypted share (nothing after `#`)")
     })?;
-    // The fragment carries a 32-byte secret. Without a PIN it *is* the key; with
-    // one, the key is PBKDF2(PIN, secret) — same derivation the browser runs.
-    let secret = crypto::key_from_fragment(fragment)?;
+    // The fragment is `<secret>` or `<secret>.<encrypted-metadata>`. Without a PIN
+    // the secret *is* the key; with one, the key is PBKDF2(PIN, secret). The
+    // metadata (filename + trust) is decrypted with the secret — the server never
+    // saw it.
+    let (secret, meta) = parse_fragment(fragment)?;
     let key = match pin {
         Some(p) => crypto::derive_key(p, &secret),
         None => secret,
     };
+    // Trust: show who the file is from before pulling it.
+    if let Some((_, from, msg)) = &meta {
+        if !from.is_empty() {
+            eprintln!("  {} {}", ui::dim("from"), ui::bold(from));
+            if !msg.is_empty() {
+                eprintln!("       {msg}");
+            }
+        }
+    }
+    let meta_name = meta
+        .as_ref()
+        .map(|(n, _, _)| n.clone())
+        .filter(|n| !n.is_empty());
     let out_path = out
         .map(PathBuf::from)
+        .or_else(|| meta_name.map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(filename_from_url(base)));
 
     // A full-tier link is the browser page URL (`…/d/<id>/<name>`); the CLI
@@ -60,8 +76,31 @@ pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Split the fragment into the secret and (optional) decrypted metadata. The
+/// fragment is `<secret>` (older/simple links) or `<secret>.<meta>` (full tier).
+/// Returns the 32-byte secret and, if present, `(filename, from, message)`.
+#[allow(clippy::type_complexity)]
+fn parse_fragment(fragment: &str) -> Result<([u8; 32], Option<(String, String, String)>)> {
+    let (secret_b64, meta_b64) = match fragment.split_once('.') {
+        Some((s, m)) => (s, Some(m)),
+        None => (fragment, None),
+    };
+    let secret = crypto::key_from_fragment(secret_b64)?;
+    let meta = match meta_b64 {
+        Some(m) => {
+            let plain = crypto::decrypt_meta(&secret, m)?;
+            let v: serde_json::Value =
+                serde_json::from_slice(&plain).map_err(|_| anyhow!("unreadable link metadata"))?;
+            let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
+            Some((s("name"), s("from"), s("msg")))
+        }
+        None => None,
+    };
+    Ok((secret, meta))
+}
+
 /// Derive the output filename from the URL's last path segment (percent-decoded),
-/// ignoring the query string.
+/// ignoring the query string. Fallback when a link carries no metadata.
 fn filename_from_url(base: &str) -> String {
     let path = base.split('?').next().unwrap_or(base);
     let name = path.rsplit('/').next().unwrap_or("download");

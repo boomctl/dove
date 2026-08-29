@@ -71,12 +71,15 @@ def _meta(share_id):
     item = _ddb.get_item(TableName=TABLE, Key={"id": {"S": share_id}}).get("Item")
     if not item:
         return _resp(404, json.dumps({"error": "not found"}), "application/json")
-    s3_key = item["s3_key"]["S"]
-    size = 0
-    try:
-        size = _s3.head_object(Bucket=BUCKET, Key=s3_key)["ContentLength"]
-    except Exception:  # noqa: BLE001
-        pass
+    # Size is stored on the item (no per-request HeadObject). The filename is NOT
+    # here — it's end-to-end encrypted in the link's fragment, which the gate
+    # never sees. The page decrypts it client-side.
+    size = int(item.get("size", {}).get("N", "0"))
+    if not size:  # older shares written before size was stored
+        try:
+            size = _s3.head_object(Bucket=BUCKET, Key=item["s3_key"]["S"])["ContentLength"]
+        except Exception:  # noqa: BLE001
+            pass
     pin_required = "pin_hash" in item
     locked = pin_required and int(item.get("pin_attempts", {}).get("N", "0")) >= MAX_PIN_ATTEMPTS
     body = json.dumps(
@@ -85,7 +88,6 @@ def _meta(share_id):
             "downloads_total": int(item.get("downloads_total", {}).get("N", "0")),
             "expires_at": int(item["expires_at"]["N"]),
             "size": size,
-            "name": s3_key.split("/", 1)[-1],
             "pin_required": pin_required,
             "locked": locked,
         }

@@ -12,6 +12,7 @@ mod domain;
 mod duration;
 mod gate;
 mod get;
+mod ledger;
 mod provision;
 mod s3;
 mod secrets;
@@ -76,6 +77,14 @@ enum Command {
         /// `--pin 4917` sets your own.
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         pin: Option<String>,
+        /// Full tier only: your name, shown to the recipient *before* they enter
+        /// the PIN — a trust signal. Encrypted in the link; the server never sees it.
+        #[arg(long)]
+        from: Option<String>,
+        /// Full tier only: a short message shown alongside your name. Encrypted in
+        /// the link; the server never sees it.
+        #[arg(long)]
+        message: Option<String>,
     },
     /// Fetch and decrypt an encrypted dove share link (key rides the #fragment).
     Get {
@@ -135,7 +144,9 @@ fn main() -> Result<()> {
             encrypt,
             downloads,
             pin,
-        } => share::run(&file, &expires, encrypt, downloads, pin),
+            from,
+            message,
+        } => share::run(&file, &expires, encrypt, downloads, pin, from, message),
         Command::Get { url, out, pin } => get::run(&url, out.as_deref(), pin.as_deref()),
         Command::Domain {
             action: DomainAction::Add { domain },
