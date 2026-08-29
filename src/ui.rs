@@ -46,23 +46,35 @@ pub fn field(label: &str, value: &str) {
     eprintln!("  {}  {}", dim(&format!("{label:<8}")), value);
 }
 
-/// Run a provisioning step with a trailing ✓/✗ — dim label, green check on
-/// success, red cross on failure. Returns the step's result unchanged.
-pub fn step<T>(label: &str, work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+/// A dotted step's opening half: the dim, padded label followed by a midline
+/// dot, with no trailing newline — `step_end` (or `step`'s own
+/// closure-wrapping) finishes the line in place via `\r`. Split out of `step`
+/// so a caller that reports progress through a callback (rather than a
+/// wrapped closure — see `CliProgress`) can drive the same two-line dance.
+pub fn step_begin(label: &str) {
     let padded = format!("{label:<24}");
     if tty() {
         eprint!("  {} {}", dim(&padded), dim("·"));
         let _ = std::io::stderr().flush();
     }
-    let result = work();
-    let mark = if result.is_ok() {
-        green("✓")
-    } else {
-        red("✗")
-    };
+}
+
+/// Finish a dotted step opened by `step_begin`, overwriting the trailing dot
+/// with a green ✓ (or red ✗ on failure).
+pub fn step_end(label: &str, ok: bool) {
+    let padded = format!("{label:<24}");
+    let mark = if ok { green("✓") } else { red("✗") };
     if tty() {
         eprintln!("\r  {} {}", dim(&padded), mark);
     }
+}
+
+/// Run a provisioning step with a trailing ✓/✗ — dim label, green check on
+/// success, red cross on failure. Returns the step's result unchanged.
+pub fn step<T>(label: &str, work: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    step_begin(label);
+    let result = work();
+    step_end(label, result.is_ok());
     result
 }
 
@@ -122,7 +134,7 @@ impl Progress {
         self.render(done);
     }
 
-    pub fn finish(self) {
+    pub fn finish(&self) {
         self.render(self.total);
         if tty() {
             eprintln!();

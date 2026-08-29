@@ -8,6 +8,7 @@
 
 mod apigw;
 mod breaker;
+mod cli_progress;
 mod cloudfront;
 mod domain;
 mod gate;

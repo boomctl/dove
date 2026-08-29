@@ -1,17 +1,22 @@
 //! `dove share <file> --expires <dur>` — upload a file and print an expiring
-//! presigned link. The terminal echo of the marketing mock: a dotted upload
-//! bar, the size, the URL, and a quiet "expires in …" line.
+//! link. The terminal echo of the marketing mock: a dotted upload bar, the
+//! size, the URL, and a quiet "expires in …" line.
+//!
+//! The actual share logic (both the simple-tier presigned-URL path and the
+//! full-tier gated/encrypted path) lives in `dove_core::backend::SelfHosted`
+//! — this module just resolves what to upload (zipping a directory if
+//! needed), asks the active backend to share it, and renders the result.
 
+use crate::cli_progress::CliProgress;
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
-use dove_core::config::{Registry, SelfHostedConfig};
+use dove_core::config::Registry;
 use dove_core::s3::Store;
-use dove_core::{crypto, duration as dur};
+use dove_core::transfer::{ShareRequest, Transfer};
+use dove_core::{backend::SelfHosted, duration as dur};
 use std::fs::File;
-use std::io::{BufWriter, Seek, Write};
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
@@ -25,8 +30,12 @@ pub fn run(
     message: Option<String>,
 ) -> Result<()> {
     let ttl = dur::parse(expires)?;
-    // Fail fast if not provisioned, before we spend time zipping/encrypting.
-    let cfg = Registry::load()?.active_self_hosted()?;
+    // Fail fast if not provisioned or the request needs the full tier, before
+    // we spend time zipping/encrypting. `SelfHosted::share` re-checks these
+    // (it's the source of truth), but bailing here preserves the original
+    // fail-before-zip behavior for a directory share.
+    let registry = Registry::load()?;
+    let cfg = registry.active_self_hosted()?;
     if pin.is_some() && !cfg.is_full() {
         bail!(
             "--pin is a full-tier feature: it's checked at the gate, which the simple tier \
@@ -39,189 +48,59 @@ pub fn run(
              Provision it with `dove provision full`."
         );
     }
-    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
-    let (source, name, zip_temp) = prepare_upload(path)?;
-
-    if cfg.is_full() {
-        return share_full(
-            &cfg,
-            &store,
-            &source,
-            &name,
-            ttl,
-            downloads.unwrap_or(100),
-            pin,
-            from,
-            message,
-            zip_temp,
-        );
-    }
-
-    // Simple tier: presigned links, capped at 7 days, optional --encrypt.
-    if !dur::within_presign_limit(ttl) {
-        bail!(
-            "--expires {expires} is over the 7-day limit for the simple tier's presigned links.\n\
-             Use 7d or less. Longer-lived shares and download limits are the full tier — \
-             provision it with `dove provision full`."
-        );
-    }
-    let (upload, ct_temp, fragment) = if encrypt {
-        let content_key = crypto::gen_key();
-        let ct = temp_zip_path();
-        ui::step("encrypting", || {
-            let reader = File::open(&source)?;
-            let writer = BufWriter::new(File::create(&ct)?);
-            crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
-        })?;
-        (
-            ct.clone(),
-            Some(ct),
-            Some(crypto::key_to_fragment(&content_key)),
-        )
-    } else {
-        (source.clone(), None, None)
-    };
-
-    let object_key = share_key(&name);
-    let size = std::fs::metadata(&upload)?.len();
-    let bar = ui::Progress::new("uploading", size);
-    // TODO(dove-core extraction, later task): wire the real CLI progress bar
-    // through a `dove_core::progress::Progress` impl over `bar`; silent for now.
-    let uploaded = store.put_file(&object_key, &upload, &dove_core::progress::Silent);
-    for t in [zip_temp, ct_temp].into_iter().flatten() {
-        let _ = std::fs::remove_file(t);
-    }
-    uploaded?;
-    bar.finish();
-    ui::status("uploaded", &ui::human_size(size));
-
-    let mut url = store.presign_get(&object_key, ttl);
-    if let Some(frag) = fragment {
-        url.push('#');
-        url.push_str(&frag);
-    }
-    ui::share_result(&url, &format!("expires in {}", dur::human_long(ttl)));
-    Ok(())
-}
-
-/// Full tier: always encrypt, register a download policy in DynamoDB, and hand
-/// out a gate link (`<gate>/d/<id>#<secret>.<meta>`). The gate enforces the
-/// budget; the key **and** the filename + trust metadata ride the fragment, so
-/// the server sees neither the content nor the real filename.
-#[allow(clippy::too_many_arguments)]
-fn share_full(
-    cfg: &SelfHostedConfig,
-    store: &Store,
-    source: &Path,
-    name: &str,
-    ttl: Duration,
-    downloads: u32,
-    pin: Option<String>,
-    from: Option<String>,
-    message: Option<String>,
-    zip_temp: Option<PathBuf>,
-) -> Result<()> {
-    // A MAC'd share id: the gate rejects any id it didn't mint before touching
-    // the database, so forged / random-id floods die at a cheap check.
-    let gate_secret = dove_core::secrets::Secrets::load()?
-        .gate_secret
-        .ok_or_else(|| anyhow!("no gate secret in secrets.toml — re-run `dove provision full`"))?;
-    let share_id = crypto::new_share_id(&gate_secret)?;
-
-    // The fragment always carries a random secret. Without a PIN it *is* the
-    // content key. With a PIN, the content key is PBKDF2(PIN, secret) — the PIN
-    // (delivered out of band) is the second factor and the gate also verifies it.
-    let fragment_secret = crypto::gen_key();
-    let (content_key, resolved_pin) = match &pin {
-        Some(p) => {
-            let value = if p.trim().is_empty() {
-                gen_pin()
-            } else {
-                p.trim().to_string()
-            };
-            (crypto::derive_key(&value, &fragment_secret), Some(value))
+    // A `--pin` with no value means "generate one for me" — resolved here (not
+    // in dove-core) so the CLI still has the plaintext PIN in scope afterward
+    // to print the PIN callout; dove-core's `ShareRequest.pin` always carries
+    // the final, concrete value.
+    let resolved_pin = pin.map(|p| {
+        let p = p.trim();
+        if p.is_empty() {
+            gen_pin()
+        } else {
+            p.to_string()
         }
-        None => (fragment_secret, None),
-    };
-    let pin_hash = resolved_pin
-        .as_ref()
-        .map(|p| crypto::pin_hash(&share_id, p));
-
-    let ct = temp_zip_path();
-    ui::step("encrypting", || {
-        let reader = File::open(source)?;
-        let writer = BufWriter::new(File::create(&ct)?);
-        crypto::encrypt(&content_key, crypto::DEFAULT_CHUNK, reader, writer)
-    })?;
-
-    let object_key = share_id.clone(); // name-free: the filename is E2E, in the fragment
-    let size = std::fs::metadata(&ct)?.len();
-    let bar = ui::Progress::new("uploading", size);
-    // TODO(dove-core extraction, later task): wire the real CLI progress bar
-    // through a `dove_core::progress::Progress` impl over `bar`; silent for now.
-    let uploaded = store.put_file(&object_key, &ct, &dove_core::progress::Silent);
-    for t in [zip_temp, Some(ct)].into_iter().flatten() {
-        let _ = std::fs::remove_file(t);
-    }
-    uploaded?;
-    bar.finish();
-    ui::status("uploaded", &ui::human_size(size));
-
-    // The filename + trust (sender name, message) are encrypted with the secret
-    // and stored on the server as opaque ciphertext — the server can't read them
-    // (same as the file). Kept *off* the URL so links stay short and constant
-    // regardless of filename/message length; the page/`get` fetch + decrypt it.
-    let meta_json = serde_json::json!({
-        "name": name,
-        "from": from.as_deref().unwrap_or(""),
-        "msg": message.as_deref().unwrap_or(""),
-    })
-    .to_string();
-    let meta_blob = crypto::encrypt_meta(&fragment_secret, meta_json.as_bytes());
-
-    let expires_at = now_epoch() + ttl.as_secs();
-    ui::step("registering policy", || {
-        put_policy_item(
-            cfg,
-            &share_id,
-            &object_key,
-            downloads,
-            expires_at,
-            size,
-            &meta_blob,
-            pin_hash.as_deref(),
-        )
-    })?;
-
-    // Keep a local id → filename record so `dove ls` can show it (the server,
-    // holding only a name-free key, can't). Best-effort; never fails the share.
-    let _ = dove_core::ledger::record(dove_core::ledger::ShareRecord {
-        id: share_id.clone(),
-        name: name.to_string(),
-        from: from.clone(),
-        created_at: now_epoch(),
-        expires_at,
-        downloads,
     });
 
-    let gate = cfg
-        .gate_url
-        .as_ref()
-        .ok_or_else(|| anyhow!("no gate URL in config"))?;
-    let url = format!(
-        "{gate}/d/{share_id}#{}",
-        crypto::key_to_fragment(&fragment_secret)
-    );
-    let plural = if downloads == 1 { "" } else { "s" };
-    ui::share_result(
-        &url,
-        &format!(
-            "expires in {} · {downloads} download{plural}",
-            dur::human_long(ttl)
-        ),
-    );
-    if let Some(p) = resolved_pin {
-        ui::pin_notice(&p);
+    let (upload_path, zip_temp) = prepare_upload(path)?;
+
+    let backend = SelfHosted::from_backend(registry.active_backend()?)?;
+    let progress = CliProgress::new("uploading");
+    let req = ShareRequest {
+        path: upload_path,
+        expires: ttl,
+        encrypt,
+        downloads,
+        pin: resolved_pin.clone(),
+        from,
+        message,
+    };
+    let result = backend.share(req, &progress);
+    if let Some(t) = zip_temp {
+        let _ = std::fs::remove_file(&t);
+        if let Some(parent) = t.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    if result.is_err() {
+        progress.fail_pending();
+    }
+    let share = result?;
+
+    if cfg.is_full() {
+        let downloads = downloads.unwrap_or(100);
+        let plural = if downloads == 1 { "" } else { "s" };
+        ui::share_result(
+            &share.link,
+            &format!(
+                "expires in {} · {downloads} download{plural}",
+                dur::human_long(ttl)
+            ),
+        );
+        if let Some(p) = resolved_pin {
+            ui::pin_notice(&p);
+        }
+    } else {
+        ui::share_result(&share.link, &format!("expires in {}", dur::human_long(ttl)));
     }
     Ok(())
 }
@@ -234,100 +113,37 @@ fn gen_pin() -> String {
     format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
 }
 
-/// Write the share's policy row to DynamoDB via the AWS CLI (operator profile).
-#[allow(clippy::too_many_arguments)]
-fn put_policy_item(
-    cfg: &SelfHostedConfig,
-    id: &str,
-    s3_key: &str,
-    downloads: u32,
-    expires_at: u64,
-    size: u64,
-    meta_blob: &str,
-    pin_hash: Option<&str>,
-) -> Result<()> {
-    let table = cfg
-        .table
-        .as_ref()
-        .ok_or_else(|| anyhow!("no table in config"))?;
-    // `size` is stored so /meta reads it from DynamoDB instead of a per-request
-    // S3 HeadObject. `meta` is the encrypted filename+trust blob — opaque to the
-    // server, decrypted client-side with the fragment secret.
-    let mut item = serde_json::json!({
-        "id": {"S": id},
-        "s3_key": {"S": s3_key},
-        "downloads_remaining": {"N": downloads.to_string()},
-        "downloads_total": {"N": downloads.to_string()},
-        "expires_at": {"N": expires_at.to_string()},
-        "created_at": {"N": now_epoch().to_string()},
-        "size": {"N": size.to_string()},
-        "meta": {"S": meta_blob},
-    });
-    if let Some(hash) = pin_hash {
-        // pin_attempts starts at 0; the gate increments on each wrong guess and
-        // locks the share once it hits the ceiling.
-        item["pin_hash"] = serde_json::json!({"S": hash});
-        item["pin_attempts"] = serde_json::json!({"N": "0"});
-    }
-    let item = item.to_string();
-    let mut cmd = Command::new("aws");
-    if let Some(p) = &cfg.profile {
-        cmd.args(["--profile", p]);
-    }
-    cmd.args([
-        "dynamodb",
-        "put-item",
-        "--table-name",
-        table,
-        "--item",
-        &item,
-    ]);
-    let out = cmd.output().context("running aws dynamodb put-item")?;
-    if !out.status.success() {
-        bail!(
-            "registering the share policy failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
-}
-
-fn now_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Resolve what to upload and under what name: a file as-is, or a directory
-/// zipped into a temp `<dirname>.zip` (the third element is the temp path to
-/// clean up afterward, if any).
-fn prepare_upload(path: &Path) -> Result<(PathBuf, String, Option<PathBuf>)> {
+/// zipped into a temp `<dirname>.zip` — kept in its own throwaway temp
+/// directory so the archive's filename is exactly `<dirname>.zip` (dove-core
+/// derives the share's name from the uploaded path's filename, and that name
+/// rides the link/metadata, so it must match what a recipient would expect).
+/// The second element is that temp path, to clean up afterward, if any.
+fn prepare_upload(path: &Path) -> Result<(PathBuf, Option<PathBuf>)> {
     if path.is_file() {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow!("{} has no usable filename", path.display()))?;
-        Ok((path.to_path_buf(), name.to_string(), None))
+        Ok((path.to_path_buf(), None))
     } else if path.is_dir() {
         let dirname = path
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("{} has no usable directory name", path.display()))?;
-        let tmp = temp_zip_path();
+        let dir = temp_zip_dir();
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let tmp = dir.join(format!("{dirname}.zip"));
         ui::step("zipping directory", || zip_dir(path, &tmp))?;
-        Ok((tmp.clone(), format!("{dirname}.zip"), Some(tmp)))
+        Ok((tmp.clone(), Some(tmp)))
     } else {
         bail!("not a file or directory: {}", path.display())
     }
 }
 
-/// A unique temp path for the zip we build before upload.
-fn temp_zip_path() -> PathBuf {
+/// A unique, freshly-created temp directory to hold the zip built from a
+/// shared directory (so the zip's own filename can stay `<dirname>.zip`).
+fn temp_zip_dir() -> PathBuf {
     let mut b = [0u8; 8];
     getrandom::getrandom(&mut b).expect("OS RNG unavailable");
     let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    std::env::temp_dir().join(format!("dove-{hex}.zip"))
+    std::env::temp_dir().join(format!("dove-{hex}"))
 }
 
 /// Zip `dir` into `dest`, with the directory's own name as the top-level folder
@@ -433,31 +249,9 @@ fn share_row(key: &str, names: &std::collections::HashMap<String, String>) -> St
     }
 }
 
-/// A share object key: a random prefix so filenames neither collide nor expose
-/// a guessable listing — `<8 hex>/<filename>`.
-fn share_key(filename: &str) -> String {
-    let mut b = [0u8; 4];
-    getrandom::getrandom(&mut b).expect("OS RNG unavailable");
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}/{filename}",
-        b[0], b[1], b[2], b[3]
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn share_key_has_random_prefix_and_keeps_the_name() {
-        let k = share_key("report.pdf");
-        assert!(k.ends_with("/report.pdf"), "{k}");
-        let prefix = k.split('/').next().unwrap();
-        assert_eq!(prefix.len(), 8);
-        assert!(prefix.chars().all(|c| c.is_ascii_hexdigit()));
-        // Randomised: two keys for the same name differ.
-        assert_ne!(share_key("report.pdf"), share_key("report.pdf"));
-    }
 
     #[test]
     fn share_row_shows_name_and_id() {
@@ -510,5 +304,14 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_file(&zip_path).ok();
+    }
+
+    /// A standalone temp zip path for the test above (prepare_upload uses
+    /// `temp_zip_dir` instead, so the archive's own filename isn't lost).
+    fn temp_zip_path() -> PathBuf {
+        let mut b = [0u8; 8];
+        getrandom::getrandom(&mut b).unwrap();
+        let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        std::env::temp_dir().join(format!("dove-{hex}.zip"))
     }
 }
