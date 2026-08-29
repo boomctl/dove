@@ -23,7 +23,6 @@ use std::path::PathBuf;
 /// `dove request "<description>"` — register an ask with the gate and print
 /// the link to hand to whoever's uploading. Full tier only: a request needs
 /// the gate (to authorize an upload) and DynamoDB (to hold its policy).
-#[allow(clippy::too_many_arguments)]
 pub fn create(
     description: &str,
     from: Option<String>,
@@ -97,8 +96,13 @@ pub fn list() -> Result<()> {
     let registry = Registry::load()?;
     let sh = SelfHosted::from_backend(registry.active_backend()?)?;
     for rec in &records {
-        let status = sh.request_status(rec)?;
-        println!("{}", request_row(rec, &status));
+        // One row's poll failing (a 404/expired/transient blip — see
+        // `fetch_rmeta`'s gate-404 -> `Error::NotFound` mapping) must never
+        // blank the whole inbox: degrade just that line and keep going.
+        match sh.request_status(rec) {
+            Ok(status) => println!("{}", request_row(rec, &status)),
+            Err(_) => println!("{}", unreachable_row(rec)),
+        }
     }
     Ok(())
 }
@@ -145,6 +149,13 @@ fn gen_pin() -> String {
     format!("{:06}", u32::from_le_bytes(b) % 1_000_000)
 }
 
+/// The common `dove requests` row layout: description, state, dim id —
+/// shared by [`request_row`] (a successful poll) and [`unreachable_row`] (a
+/// failed one), so both stay visually consistent.
+fn row_line(description: &str, state: &str, id: &str) -> String {
+    format!("  {description}  {state}  {}", ui::dim(id))
+}
+
 /// One `dove requests` row: the description, its live state, and the dim id.
 /// Pure, so it's testable without a gate to poll.
 fn request_row(rec: &RequestRecord, status: &RequestStatus) -> String {
@@ -155,7 +166,15 @@ fn request_row(rec: &RequestRecord, status: &RequestStatus) -> String {
         }
         RequestStatus::Failed { reason } => format!("failed · {reason}"),
     };
-    format!("  {}  {}  {}", rec.description, state, ui::dim(&rec.id))
+    row_line(&rec.description, &state, &rec.id)
+}
+
+/// A `dove requests` row for an entry whose gate poll itself failed (a
+/// 404/expired/transient network blip, not a request-level `Failed` status).
+/// Degrades that ONE line instead of aborting the whole listing. Pure, so
+/// it's testable without a gate to poll.
+fn unreachable_row(rec: &RequestRecord) -> String {
+    row_line(&rec.description, "unreachable", &rec.id)
 }
 
 #[cfg(test)]
@@ -200,5 +219,13 @@ mod tests {
             },
         );
         assert!(row.contains("failed") && row.contains("expired"));
+    }
+
+    #[test]
+    fn unreachable_row_shows_unreachable_not_an_error() {
+        let row = unreachable_row(&rec());
+        assert!(row.contains("invoice"));
+        assert!(row.contains("unreachable"));
+        assert!(row.contains("ab12cd34"));
     }
 }
