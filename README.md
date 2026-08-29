@@ -91,6 +91,13 @@ git clone https://github.com/boomctl/dove && cd dove
 cargo install --path .
 ```
 
+**With Cargo** — from crates.io. The crate is **`dove-cli`** (it installs a `dove`
+binary; the `dove` crate name belongs to an unrelated project):
+
+```sh
+cargo install dove-cli
+```
+
 Every release ships prebuilt binaries for macOS, Linux, and Windows from
 **[dove.sh](https://dove.sh)** and
 [github.com/boomctl/dove/releases](https://github.com/boomctl/dove/releases) —
