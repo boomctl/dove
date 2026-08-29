@@ -11,6 +11,7 @@ mod domain;
 mod gatectl;
 mod get;
 mod provision;
+mod requestcmd;
 mod share;
 mod ui;
 mod usecmd;
@@ -106,6 +107,33 @@ enum Command {
     },
     /// List the shares currently in the bucket.
     Ls,
+    /// Ask someone else to upload a file to you: register a request with the
+    /// gate and print a link. Full tier only.
+    Request {
+        /// What you're asking for, shown to the uploader (e.g. "Q3 invoice").
+        description: String,
+        /// Your name, shown to the uploader before they upload — a trust signal.
+        #[arg(long)]
+        from: Option<String>,
+        /// A short message shown alongside your name.
+        #[arg(long)]
+        message: Option<String>,
+        /// PIN-lock the request: the uploader needs it to authorize their
+        /// upload. `--pin` generates one; `--pin 4917` sets your own.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        pin: Option<String>,
+        /// How long the link stays valid: `3d`, `12h`, `30m`.
+        #[arg(long, default_value = "3d")]
+        expires: String,
+        /// How many times the link may be used to upload before it's spent.
+        #[arg(long, default_value_t = 1)]
+        uploads: u32,
+    },
+    /// List the file requests this machine created, with live status.
+    Requests {
+        #[command(subcommand)]
+        action: Option<RequestsAction>,
+    },
     /// Revoke a share early by its id, so its link 404s.
     Revoke {
         /// The share id (the prefix shown by `dove ls`).
@@ -128,6 +156,18 @@ enum DomainAction {
     Add {
         /// The subdomain to serve shares from.
         domain: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RequestsAction {
+    /// Collect what was uploaded for a request.
+    Get {
+        /// The request id (as shown by `dove requests`).
+        id: String,
+        /// Write to this path instead of the uploader's filename.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -175,6 +215,18 @@ fn main() -> Result<()> {
             GateAction::Status => gatectl::status(),
         },
         Command::Ls => share::list(),
+        Command::Request {
+            description,
+            from,
+            message,
+            pin,
+            expires,
+            uploads,
+        } => requestcmd::create(&description, from, message, pin, &expires, uploads),
+        Command::Requests { action } => match action {
+            None => requestcmd::list(),
+            Some(RequestsAction::Get { id, out }) => requestcmd::get(&id, out),
+        },
         Command::Revoke { id } => share::revoke(&id),
         Command::Status => share::status(),
         Command::Use { name } => usecmd::run(&name),
