@@ -13,16 +13,18 @@
     for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
     return u;
   }
-  // fragment = "<secret>" (older/simple links) or "<secret>.<encrypted-metadata>".
+  // The fragment is just the secret now — the encrypted metadata lives on the
+  // server (so links stay short). Split on '.' only for backward compatibility.
   const fragRaw = location.hash.replace(/^#/, '').trim();
-  const [secretB64, metaB64] = fragRaw.split('.');
+  const [secretB64] = fragRaw.split('.');
   function keyBytesFromFragment() {
     if (!secretB64) return null;
     try { const u = b64urlToBytes(secretB64); return u.length === 32 ? u : null; } catch { return null; }
   }
   // Decrypt the metadata blob with SHA-256(secret ‖ "dove-meta-v1") — the exact
-  // key dove derives in Rust. Returns {name, from, msg} or null. Server never saw it.
-  async function loadMeta() {
+  // key dove derives in Rust. Returns {name, from, msg} or null. The server holds
+  // this blob as opaque ciphertext; it's decrypted only here.
+  async function decryptMeta(metaB64) {
     const secret = keyBytesFromFragment();
     if (!secret || !metaB64) return null;
     try {
@@ -213,8 +215,17 @@
   }
   (async () => {
     if (!shareId) return;
-    // Decrypt the fragment metadata first — filename + trust, entirely client-side.
-    const fm = await loadMeta();
+    let meta;
+    try {
+      const r = await fetch(`${location.origin}/meta/${shareId}`);
+      if (r.status === 404) return showGone('This share is unavailable.', 'It may have been revoked, or it never existed.');
+      if (!r.ok) return; // leave the page as-is on a transient error
+      meta = await r.json();
+    } catch { return; }
+
+    // Decrypt the metadata (filename + trust) from the server's opaque blob —
+    // the key is in the fragment, so this happens only here, client-side.
+    const fm = await decryptMeta(meta.meta);
     if (fm) {
       if (fm.name) filename = fm.name;
       const title = document.querySelector('#file-title'); if (title) title.textContent = filename;
@@ -226,13 +237,6 @@
         const banner = document.querySelector('#trust-banner'); if (banner) banner.hidden = false;
       }
     }
-    let meta;
-    try {
-      const r = await fetch(`${location.origin}/meta/${shareId}`);
-      if (r.status === 404) return showGone('This share is unavailable.', 'It may have been revoked, or it never existed.');
-      if (!r.ok) return; // leave the page as-is on a transient error
-      meta = await r.json();
-    } catch { return; }
 
     const now = Math.floor(Date.now() / 1000);
     const size = meta.size || 0;

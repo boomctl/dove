@@ -88,6 +88,9 @@ def _meta(share_id):
             "downloads_total": int(item.get("downloads_total", {}).get("N", "0")),
             "expires_at": int(item["expires_at"]["N"]),
             "size": size,
+            # Opaque encrypted blob (filename + trust); the client decrypts it with
+            # the fragment secret. The gate can't read it.
+            "meta": item.get("meta", {}).get("S", ""),
             "pin_required": pin_required,
             "locked": locked,
         }

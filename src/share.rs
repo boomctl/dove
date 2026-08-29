@@ -157,8 +157,10 @@ fn share_full(
     bar.finish();
     ui::status("uploaded", &ui::human_size(size));
 
-    // The filename + trust (sender name, message) ride the fragment, encrypted
-    // with the secret — the server never sees them. Shown pre-PIN by the page.
+    // The filename + trust (sender name, message) are encrypted with the secret
+    // and stored on the server as opaque ciphertext — the server can't read them
+    // (same as the file). Kept *off* the URL so links stay short and constant
+    // regardless of filename/message length; the page/`get` fetch + decrypt it.
     let meta_json = serde_json::json!({
         "name": name,
         "from": from.as_deref().unwrap_or(""),
@@ -176,6 +178,7 @@ fn share_full(
             downloads,
             expires_at,
             size,
+            &meta_blob,
             pin_hash.as_deref(),
         )
     })?;
@@ -196,9 +199,8 @@ fn share_full(
         .as_ref()
         .ok_or_else(|| anyhow!("no gate URL in config"))?;
     let url = format!(
-        "{gate}/d/{share_id}#{}.{}",
-        crypto::key_to_fragment(&fragment_secret),
-        meta_blob
+        "{gate}/d/{share_id}#{}",
+        crypto::key_to_fragment(&fragment_secret)
     );
     let plural = if downloads == 1 { "" } else { "s" };
     ui::share_result(
@@ -223,6 +225,7 @@ fn gen_pin() -> String {
 }
 
 /// Write the share's policy row to DynamoDB via the AWS CLI (operator profile).
+#[allow(clippy::too_many_arguments)]
 fn put_policy_item(
     cfg: &Config,
     id: &str,
@@ -230,6 +233,7 @@ fn put_policy_item(
     downloads: u32,
     expires_at: u64,
     size: u64,
+    meta_blob: &str,
     pin_hash: Option<&str>,
 ) -> Result<()> {
     let table = cfg
@@ -237,7 +241,8 @@ fn put_policy_item(
         .as_ref()
         .ok_or_else(|| anyhow!("no table in config"))?;
     // `size` is stored so /meta reads it from DynamoDB instead of a per-request
-    // S3 HeadObject (cheaper, and one fewer thing the gate touches).
+    // S3 HeadObject. `meta` is the encrypted filename+trust blob — opaque to the
+    // server, decrypted client-side with the fragment secret.
     let mut item = serde_json::json!({
         "id": {"S": id},
         "s3_key": {"S": s3_key},
@@ -246,6 +251,7 @@ fn put_policy_item(
         "expires_at": {"N": expires_at.to_string()},
         "created_at": {"N": now_epoch().to_string()},
         "size": {"N": size.to_string()},
+        "meta": {"S": meta_blob},
     });
     if let Some(hash) = pin_hash {
         // pin_attempts starts at 0; the gate increments on each wrong guess and

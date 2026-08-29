@@ -12,15 +12,17 @@ pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     let (base, fragment) = url.rsplit_once('#').ok_or_else(|| {
         anyhow!("this link has no key — it isn't a dove-encrypted share (nothing after `#`)")
     })?;
-    // The fragment is `<secret>` or `<secret>.<encrypted-metadata>`. Without a PIN
-    // the secret *is* the key; with one, the key is PBKDF2(PIN, secret). The
-    // metadata (filename + trust) is decrypted with the secret — the server never
-    // saw it.
-    let (secret, meta) = parse_fragment(fragment)?;
+    // The fragment is the secret (older links may append ".<meta>" — ignore it).
+    // Without a PIN the secret *is* the key; with one, the key is PBKDF2(PIN,
+    // secret).
+    let secret = crypto::key_from_fragment(fragment.split('.').next().unwrap_or(fragment))?;
     let key = match pin {
         Some(p) => crypto::derive_key(p, &secret),
         None => secret,
     };
+    // Filename + trust come from the gate's /meta blob, decrypted with the secret
+    // (the server holds it as opaque ciphertext).
+    let meta = fetch_meta(base, &secret);
     // Trust: show who the file is from before pulling it.
     if let Some((_, from, msg)) = &meta {
         if !from.is_empty() {
@@ -76,27 +78,30 @@ pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Split the fragment into the secret and (optional) decrypted metadata. The
-/// fragment is `<secret>` (older/simple links) or `<secret>.<meta>` (full tier).
-/// Returns the 32-byte secret and, if present, `(filename, from, message)`.
-#[allow(clippy::type_complexity)]
-fn parse_fragment(fragment: &str) -> Result<([u8; 32], Option<(String, String, String)>)> {
-    let (secret_b64, meta_b64) = match fragment.split_once('.') {
-        Some((s, m)) => (s, Some(m)),
-        None => (fragment, None),
-    };
-    let secret = crypto::key_from_fragment(secret_b64)?;
-    let meta = match meta_b64 {
-        Some(m) => {
-            let plain = crypto::decrypt_meta(&secret, m)?;
-            let v: serde_json::Value =
-                serde_json::from_slice(&plain).map_err(|_| anyhow!("unreadable link metadata"))?;
-            let s = |k: &str| v[k].as_str().unwrap_or("").to_string();
-            Some((s("name"), s("from"), s("msg")))
-        }
-        None => None,
-    };
-    Ok((secret, meta))
+/// Fetch the gate's `/meta`, decrypt its `meta` blob with the secret, and return
+/// `(filename, from, message)`. Best-effort: any failure (not a gate link, no
+/// blob, decrypt error) yields `None` and `get` falls back to the URL filename.
+fn fetch_meta(base: &str, secret: &[u8; 32]) -> Option<(String, String, String)> {
+    let meta_url = to_meta_url(base)?;
+    let body = ureq::get(&meta_url).call().ok()?.into_string().ok()?;
+    let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let blob = v["meta"].as_str().filter(|s| !s.is_empty())?;
+    let plain = crypto::decrypt_meta(secret, blob).ok()?;
+    let j: serde_json::Value = serde_json::from_slice(&plain).ok()?;
+    let s = |k: &str| j[k].as_str().unwrap_or("").to_string();
+    Some((s("name"), s("from"), s("msg")))
+}
+
+/// Turn a gate page URL (`scheme://host/d/<id>`) into its `/meta/<id>` endpoint.
+/// Returns `None` for a non-gate URL (e.g. a simple-tier presigned URL).
+fn to_meta_url(base: &str) -> Option<String> {
+    let scheme_end = base.find("://")?;
+    let after = &base[scheme_end + 3..];
+    let slash = after.find('/')?;
+    let host = &base[..scheme_end + 3 + slash];
+    let path = after[slash..].split('?').next().unwrap_or("");
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    (segs.len() >= 2 && segs[0] == "d").then(|| format!("{host}/meta/{}", segs[1]))
 }
 
 /// Derive the output filename from the URL's last path segment (percent-decoded),
