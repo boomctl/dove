@@ -174,12 +174,19 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         })?;
     }
 
-    // 5. Full tier only: the policy gate (DynamoDB + Lambda + Function URL).
-    let (table, gate_url) = if full {
+    // 5. Full tier only: the gate (DynamoDB + Lambda + API Gateway + CloudFront).
+    let prior_gate_url = Config::load().ok().and_then(|c| c.gate_url);
+    let (table, gate_url, distribution_id) = if full {
         let infra = provision_full(profile.as_deref(), &account, &bucket, &args.region)?;
-        (Some(infra.table), Some(infra.gate_url))
+        // If a custom domain was already added (`dove domain add`), keep it —
+        // don't revert to the *.cloudfront.net URL on a re-provision.
+        let url = match prior_gate_url {
+            Some(existing) if !existing.contains(".cloudfront.net") => existing,
+            _ => infra.gate_url,
+        };
+        (Some(infra.table), Some(url), infra.distribution_id)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     Config {
@@ -189,7 +196,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         endpoint: None,
         table,
         gate_url: gate_url.clone(),
-        distribution_id: None,
+        distribution_id,
     }
     .save()?;
 
@@ -213,11 +220,12 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
 struct FullInfra {
     table: String,
     gate_url: String,
+    distribution_id: Option<String>,
 }
 
-/// Provision DynamoDB (share policies) + the gate Lambda (role, function, public
-/// Function URL). Idempotent: re-running tolerates existing resources and
-/// re-fetches the Function URL.
+/// Provision the gate: DynamoDB (share policies) + the Lambda (role, function) +
+/// API Gateway + CloudFront. Idempotent: re-running reuses existing resources
+/// (API by name, distribution from the saved config).
 fn provision_full(
     profile: Option<&str>,
     account: &str,
@@ -390,60 +398,20 @@ fn provision_full(
     let _ = std::fs::remove_file(&zip);
     lambda_result?;
 
-    // Public Function URL (the gate is its own auth), fetched on re-provision.
-    let gate_url = ui::step("gate URL", || {
-        let out = aws(
-            profile,
-            &[
-                "lambda",
-                "create-function-url-config",
-                "--function-name",
-                &name,
-                "--auth-type",
-                "NONE",
-            ],
-        )?;
-        let url = if out.status.success() {
-            parse_function_url(&out.stdout)?
-        } else if String::from_utf8_lossy(&out.stderr).contains("ResourceConflictException") {
-            let got = aws(
-                profile,
-                &[
-                    "lambda",
-                    "get-function-url-config",
-                    "--function-name",
-                    &name,
-                ],
-            )?;
-            parse_function_url(&got.stdout)?
-        } else {
-            bail!(
-                "create-function-url-config: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        };
-        aws_ok(
-            profile,
-            &[
-                "lambda",
-                "add-permission",
-                "--function-name",
-                &name,
-                "--statement-id",
-                "dove-public",
-                "--action",
-                "lambda:InvokeFunctionUrl",
-                "--principal",
-                "*",
-                "--function-url-auth-type",
-                "NONE",
-            ],
-            &["ResourceConflictException"],
-        )?;
-        Ok(url)
-    })?;
+    // Public front: API Gateway → Lambda, behind CloudFront. (Public Function URLs
+    // don't work in every account; the API Gateway hop uses lambda:InvokeFunction,
+    // which is universally allowed.)
+    let function_arn = format!("arn:aws:lambda:{region}:{account}:function:{name}");
+    let api = crate::apigw::provision_api(profile, region, account, &name, &function_arn)?;
+    // Reuse an existing distribution on re-provision (from the saved config).
+    let existing_dist = Config::load().ok().and_then(|c| c.distribution_id);
+    let front = crate::cloudfront::front_gate(profile, &api.host, existing_dist.as_deref())?;
 
-    Ok(FullInfra { table, gate_url })
+    Ok(FullInfra {
+        table,
+        gate_url: format!("https://{}", front.domain),
+        distribution_id: Some(front.distribution_id),
+    })
 }
 
 /// Trust policy letting Lambda assume the gate's role.
@@ -459,17 +427,6 @@ pub fn gate_role_policy(account: &str, region: &str, table: &str, bucket: &str) 
     format!(
         r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:*:{account}:*"}},{{"Effect":"Allow","Action":["dynamodb:GetItem","dynamodb:UpdateItem"],"Resource":"arn:aws:dynamodb:{region}:{account}:table/{table}"}},{{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::{bucket}/*"}}]}}"#
     )
-}
-
-/// Extract `FunctionUrl` from a Lambda function-url-config response, without a
-/// trailing slash.
-pub fn parse_function_url(json: &[u8]) -> Result<String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(json).context("parsing function-url-config output")?;
-    let url = v["FunctionUrl"]
-        .as_str()
-        .ok_or_else(|| anyhow!("no FunctionUrl in the response"))?;
-    Ok(url.trim_end_matches('/').to_string())
 }
 
 /// A unique temp path with the given extension.
@@ -676,16 +633,6 @@ mod tests {
         assert!(p.contains("s3:GetObject"));
         assert!(p.contains("arn:aws:s3:::dove-shares-123/*"));
         assert!(p.contains("logs:PutLogEvents"));
-    }
-
-    #[test]
-    fn parse_function_url_extracts_and_trims_slash() {
-        let json =
-            br#"{"FunctionUrl":"https://abc.lambda-url.us-east-1.on.aws/","AuthType":"NONE"}"#;
-        assert_eq!(
-            parse_function_url(json).unwrap(),
-            "https://abc.lambda-url.us-east-1.on.aws"
-        );
     }
 
     #[test]

@@ -1,12 +1,7 @@
-//! CloudFront in front of the gate. dove's full tier keeps the Lambda Function
-//! URL **private** (`AWS_IAM`) and puts CloudFront in front with an Origin Access
-//! Control that signs every origin request (SigV4). CloudFront is authorized by a
-//! resource policy scoped to this one distribution. Anonymous browsers reach the
-//! gate through CloudFront; the raw Function URL is never publicly invokable.
-//!
-//! This is required, not optional: some accounts forbid public (`NONE`-auth)
-//! Function URLs outright, and OAC + IAM is the AWS-recommended, more-secure
-//! pattern regardless.
+//! CloudFront in front of the gate's API Gateway. It gives the gate a stable
+//! `*.cloudfront.net` domain (and, via `dove domain add`, a custom one), a place
+//! to attach caching/WAF later, and the perpetual free tier. The origin is the
+//! HTTP API — a plain public HTTPS origin, no signing needed.
 
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
@@ -14,8 +9,8 @@ use std::process::Command;
 
 // AWS-managed CloudFront policies.
 const CACHE_DISABLED: &str = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
-// "AllViewerExceptHostHeader" — required for a Function URL origin: forwarding
-// the viewer Host header breaks the origin's host check (and OAC signing).
+// "AllViewerExceptHostHeader": forward everything except Host, so CloudFront
+// sends the origin's own host — required for an API Gateway origin to route.
 const ALL_VIEWER_EXCEPT_HOST: &str = "b689b0a8-53d0-40ab-baf2-68738e2966ac";
 
 /// What a fronted gate resolves to.
@@ -24,87 +19,30 @@ pub struct Front {
     pub domain: String,
 }
 
-/// Stand up (or reuse) the CloudFront front for the gate: an OAC, a distribution
-/// over the Function URL origin, and the resource policy authorizing CloudFront.
-/// Returns the distribution id + its `*.cloudfront.net` domain.
+/// Stand up (or reuse) the CloudFront distribution over the gate's API Gateway
+/// origin. Returns the distribution id + its `*.cloudfront.net` domain.
 pub fn front_gate(
     profile: Option<&str>,
-    account: &str,
-    function_name: &str,
     origin_host: &str,
     existing_distribution: Option<&str>,
 ) -> Result<Front> {
-    // Reuse an existing distribution (a re-provision) — just make sure its origin
-    // and the invoke permission are current.
     if let Some(dist_id) = existing_distribution {
-        let domain = ui::step("cloudfront (reuse)", || distribution_domain(profile, dist_id))?;
-        ui::step("gate invoke permission", || {
-            grant_cloudfront_invoke(profile, function_name, account, dist_id)
+        let domain = ui::step("cloudfront (reuse)", || {
+            distribution_domain(profile, dist_id)
         })?;
         return Ok(Front {
             distribution_id: dist_id.to_string(),
             domain,
         });
     }
-
-    let oac = ui::step("origin access control", || create_oac(profile, function_name))?;
-    let front = ui::step("cloudfront distribution", || {
-        create_distribution(profile, function_name, origin_host, &oac)
-    })?;
-    // Authorize this distribution to invoke the private Function URL.
-    ui::step("gate invoke permission", || {
-        grant_cloudfront_invoke(profile, function_name, account, &front.distribution_id)
-    })?;
-    Ok(front)
+    ui::step("cloudfront distribution", || {
+        create_distribution(profile, origin_host)
+    })
 }
 
-/// Create an OAC that always SigV4-signs to a Lambda origin, reusing one by name
-/// if it exists (names are unique enough per gate: the function name).
-fn create_oac(profile: Option<&str>, function_name: &str) -> Result<String> {
-    let name = format!("{function_name}-oac");
-    // Reuse if present.
-    let list = aws(profile, &["cloudfront", "list-origin-access-controls", "--output", "json"])?;
-    if list.status.success() {
-        if let Some(id) = oac_id_by_name(&list.stdout, &name) {
-            return Ok(id);
-        }
-    }
-    let config = format!(
-        "Name={name},Description=dove gate,SigningProtocol=sigv4,\
-         SigningBehavior=always,OriginAccessControlOriginType=lambda"
-    );
-    let out = aws(
-        profile,
-        &[
-            "cloudfront",
-            "create-origin-access-control",
-            "--origin-access-control-config",
-            &config,
-            "--output",
-            "json",
-        ],
-    )?;
-    if !out.status.success() {
-        bail!(
-            "create-origin-access-control: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-    v["OriginAccessControl"]["Id"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("no OAC Id in response"))
-}
-
-fn create_distribution(
-    profile: Option<&str>,
-    function_name: &str,
-    origin_host: &str,
-    oac_id: &str,
-) -> Result<Front> {
-    let caller_ref = format!("dove-{function_name}");
-    let config = distribution_config(&caller_ref, origin_host, oac_id);
+fn create_distribution(profile: Option<&str>, origin_host: &str) -> Result<Front> {
+    let caller_ref = format!("dove-{origin_host}");
+    let config = distribution_config(&caller_ref, origin_host);
     let out = aws(
         profile,
         &[
@@ -116,60 +54,23 @@ fn create_distribution(
             "json",
         ],
     )?;
-    if out.status.success() {
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-        let id = v["Distribution"]["Id"]
-            .as_str()
-            .ok_or_else(|| anyhow!("no distribution Id"))?;
-        let domain = v["Distribution"]["DomainName"]
-            .as_str()
-            .ok_or_else(|| anyhow!("no distribution DomainName"))?;
-        return Ok(Front {
-            distribution_id: id.to_string(),
-            domain: domain.to_string(),
-        });
+    if !out.status.success() {
+        bail!(
+            "create-distribution: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
-    bail!(
-        "create-distribution: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
-}
-
-/// Resource policy: let CloudFront (this distribution only) invoke the IAM-only
-/// Function URL. Idempotent — a re-provision tolerates the existing statement.
-fn grant_cloudfront_invoke(
-    profile: Option<&str>,
-    function_name: &str,
-    account: &str,
-    dist_id: &str,
-) -> Result<()> {
-    let source_arn = format!("arn:aws:cloudfront::{account}:distribution/{dist_id}");
-    let out = aws(
-        profile,
-        &[
-            "lambda",
-            "add-permission",
-            "--function-name",
-            function_name,
-            "--statement-id",
-            "cloudfront-oac",
-            "--action",
-            "lambda:InvokeFunctionUrl",
-            "--principal",
-            "cloudfront.amazonaws.com",
-            "--source-arn",
-            &source_arn,
-            "--function-url-auth-type",
-            "AWS_IAM",
-        ],
-    )?;
-    if out.status.success() || String::from_utf8_lossy(&out.stderr).contains("ResourceConflictException") {
-        return Ok(());
-    }
-    bail!(
-        "granting CloudFront invoke: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    Ok(Front {
+        distribution_id: v["Distribution"]["Id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no distribution Id"))?
+            .to_string(),
+        domain: v["Distribution"]["DomainName"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no distribution DomainName"))?
+            .to_string(),
+    })
 }
 
 /// Attach a custom domain (`domain`) with its ACM cert to an existing gate
@@ -182,7 +83,14 @@ pub fn add_alias(
 ) -> Result<String> {
     let out = aws(
         profile,
-        &["cloudfront", "get-distribution-config", "--id", dist_id, "--output", "json"],
+        &[
+            "cloudfront",
+            "get-distribution-config",
+            "--id",
+            dist_id,
+            "--output",
+            "json",
+        ],
     )?;
     if !out.status.success() {
         bail!(
@@ -193,7 +101,7 @@ pub fn add_alias(
     let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
     let etag = v["ETag"]
         .as_str()
-        .ok_or_else(|| anyhow!("no ETag in distribution config"))?
+        .ok_or_else(|| anyhow!("no ETag"))?
         .to_string();
     let mut cfg = v["DistributionConfig"].clone();
     cfg["Aliases"] = serde_json::json!({"Quantity": 1, "Items": [domain]});
@@ -224,18 +132,24 @@ pub fn add_alias(
         ],
     );
     let _ = std::fs::remove_file(&tmp);
-    let out = out?;
-    if !out.status.success() {
-        bail!(
-            "update-distribution: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+    if !out?.status.success() {
+        bail!("update-distribution failed");
     }
     Ok(domain_name)
 }
 
 fn distribution_domain(profile: Option<&str>, dist_id: &str) -> Result<String> {
-    let out = aws(profile, &["cloudfront", "get-distribution", "--id", dist_id, "--output", "json"])?;
+    let out = aws(
+        profile,
+        &[
+            "cloudfront",
+            "get-distribution",
+            "--id",
+            dist_id,
+            "--output",
+            "json",
+        ],
+    )?;
     if !out.status.success() {
         bail!(
             "get-distribution: {}",
@@ -246,22 +160,15 @@ fn distribution_domain(profile: Option<&str>, dist_id: &str) -> Result<String> {
     v["Distribution"]["DomainName"]
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| anyhow!("no distribution DomainName"))
+        .ok_or_else(|| anyhow!("no DomainName"))
 }
 
 // ── pure helpers ──────────────────────────────────────────────────────────
 
-/// The host portion of a URL (`https://x.on.aws/` → `x.on.aws`).
-pub fn host_of(url: &str) -> Option<String> {
-    let after = url.split("://").nth(1)?;
-    let host = after.split('/').next()?;
-    (!host.is_empty()).then(|| host.to_string())
-}
-
-/// The distribution config JSON: one Function URL origin signed by the OAC, no
-/// caching (the gate is dynamic), the default CloudFront cert (a custom domain is
-/// added later by `domain add`). GET/HEAD only — the gate is read-only.
-pub fn distribution_config(caller_ref: &str, origin_host: &str, oac_id: &str) -> String {
+/// The distribution config JSON: one API Gateway origin, no caching (the gate is
+/// dynamic), the default CloudFront cert (a custom domain is added later by
+/// `domain add`). GET/HEAD only — the gate is read-only.
+pub fn distribution_config(caller_ref: &str, origin_host: &str) -> String {
     serde_json::json!({
         "CallerReference": caller_ref,
         "Comment": "dove gate",
@@ -269,7 +176,6 @@ pub fn distribution_config(caller_ref: &str, origin_host: &str, oac_id: &str) ->
         "Origins": {"Quantity": 1, "Items": [{
             "Id": "gate",
             "DomainName": origin_host,
-            "OriginAccessControlId": oac_id,
             "CustomOriginConfig": {
                 "HTTPPort": 80,
                 "HTTPSPort": 443,
@@ -293,18 +199,6 @@ pub fn distribution_config(caller_ref: &str, origin_host: &str, oac_id: &str) ->
     .to_string()
 }
 
-/// Find an OAC's Id by name in a `list-origin-access-controls` response.
-pub fn oac_id_by_name(json: &[u8], name: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(json).ok()?;
-    let items = v["OriginAccessControlList"]["Items"].as_array()?;
-    for it in items {
-        if it["Name"].as_str() == Some(name) {
-            return it["Id"].as_str().map(str::to_string);
-        }
-    }
-    None
-}
-
 fn aws(profile: Option<&str>, args: &[&str]) -> Result<std::process::Output> {
     let mut cmd = Command::new("aws");
     if let Some(p) = profile {
@@ -320,29 +214,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_of_extracts_host() {
-        assert_eq!(
-            host_of("https://abc.lambda-url.us-east-1.on.aws/").as_deref(),
-            Some("abc.lambda-url.us-east-1.on.aws")
-        );
-        assert_eq!(host_of("not a url"), None);
-    }
-
-    #[test]
-    fn distribution_config_signs_a_private_origin() {
-        let c = distribution_config("dove-fn", "abc.on.aws", "OAC123");
-        assert!(c.contains("\"DomainName\":\"abc.on.aws\""));
-        assert!(c.contains("\"OriginAccessControlId\":\"OAC123\"")); // OAC signs
+    fn distribution_config_fronts_the_api_gateway_origin() {
+        let c = distribution_config("dove-x", "abc.execute-api.us-east-1.amazonaws.com");
+        assert!(c.contains("\"DomainName\":\"abc.execute-api.us-east-1.amazonaws.com\""));
         assert!(c.contains(CACHE_DISABLED));
-        assert!(c.contains(ALL_VIEWER_EXCEPT_HOST)); // Host not forwarded
-        assert!(c.contains("CloudFrontDefaultCertificate")); // custom domain added later
-    }
-
-    #[test]
-    fn oac_id_by_name_finds_it() {
-        let json = br#"{"OriginAccessControlList":{"Items":[
-            {"Id":"A1","Name":"other-oac"},{"Id":"B2","Name":"dove-gate-oac"}]}}"#;
-        assert_eq!(oac_id_by_name(json, "dove-gate-oac").as_deref(), Some("B2"));
-        assert_eq!(oac_id_by_name(json, "missing"), None);
+        assert!(c.contains(ALL_VIEWER_EXCEPT_HOST));
+        assert!(c.contains("https-only"));
+        assert!(!c.contains("OriginAccessControlId")); // no OAC — plain origin
     }
 }
