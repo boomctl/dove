@@ -436,7 +436,8 @@ fn provision_full(
     let api = crate::apigw::provision_api(profile, region, account, &name, &function_arn)?;
     // Reuse an existing distribution on re-provision (from the saved config).
     let existing_dist = Config::load().ok().and_then(|c| c.distribution_id);
-    let front = crate::cloudfront::front_gate(profile, &api.host, existing_dist.as_deref())?;
+    let front =
+        crate::cloudfront::front_gate(profile, account, &api.host, existing_dist.as_deref())?;
 
     // Cost circuit-breaker: a flood auto-disables the gate before it can run up a
     // bill. A public endpoint on the operator's account should never exist without
