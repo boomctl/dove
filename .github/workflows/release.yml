@@ -57,12 +57,19 @@ jobs:
       - name: build (native)
         if: ${{ !matrix.cross }}
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: stage artifact
+      - name: package archive
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/dove${{ matrix.ext }}" \
-             "dist/dove-${{ matrix.target }}${{ matrix.ext }}"
+          bin="dove${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/$bin" "$bin"
+          # An archive holding a single `dove`/`dove.exe` at its root — the shape
+          # Homebrew (.tar.gz) and Scoop (.zip) expect, and what gets signed.
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            7z a "dist/dove-${{ matrix.target }}.zip" "$bin" >/dev/null
+          else
+            tar czf "dist/dove-${{ matrix.target }}.tar.gz" "$bin"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dove-${{ matrix.target }}
@@ -73,6 +80,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Checkout first — it cleans the workspace, so it must run before the
+      # artifacts land. We need packaging/render.sh for the brew/scoop step.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: staged
@@ -98,3 +108,45 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+      - name: resolve version
+        id: v
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # Render the Homebrew formula + Scoop manifest from this release's checksums
+      # and push each to its tap/bucket repo. Needs a PACKAGES_TOKEN secret with
+      # contents:write on boomctl/homebrew-tap and boomctl/scoop-bucket; without
+      # it the step is a no-op, so the release itself never depends on it.
+      - name: publish to Homebrew tap + Scoop bucket
+        env:
+          PACKAGES_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          if [ -z "$PACKAGES_TOKEN" ]; then
+            echo "::notice::PACKAGES_TOKEN not set — skipping Homebrew/Scoop publish"
+            exit 0
+          fi
+          packaging/render.sh "$VERSION" dist/SHA256SUMS rendered
+          git config --global user.name "dove-release"
+          git config --global user.email "release@dove.sh"
+          publish() {  # <repo> <rendered file> <path within repo>
+            local repo="$1" src="$2" dest="$3"
+            rm -rf pkgrepo
+            git clone --depth 1 \
+              "https://x-access-token:${PACKAGES_TOKEN}@github.com/${repo}.git" pkgrepo
+            mkdir -p "pkgrepo/$(dirname "$dest")"
+            cp "$src" "pkgrepo/$dest"
+            ( cd pkgrepo
+              if [ -z "$(git status --porcelain)" ]; then
+                echo "${repo}: already at dove ${VERSION}"
+              else
+                git add "$dest"
+                git commit -m "dove ${VERSION}"
+                git push origin HEAD
+                echo "${repo}: published dove ${VERSION}"
+              fi )
+          }
+          publish "boomctl/homebrew-tap" rendered/homebrew/dove.rb "Formula/dove.rb"
+          publish "boomctl/scoop-bucket"  rendered/scoop/dove.json  "bucket/dove.json"

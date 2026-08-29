@@ -69,6 +69,19 @@ enforce *how many times / how long* — never *what*. See
 
 ## Install
 
+**Homebrew** (macOS + Linux):
+
+```sh
+brew install boomctl/tap/dove
+```
+
+**Scoop** (Windows):
+
+```sh
+scoop bucket add boomctl https://github.com/boomctl/scoop-bucket
+scoop install dove
+```
+
 **From source** — needs [Rust](https://rustup.rs) and the
 [AWS CLI](https://aws.amazon.com/cli/) (provisioning shells out to it):
 
@@ -77,12 +90,13 @@ git clone https://github.com/boomctl/dove && cd dove
 cargo install --path .
 ```
 
-Prebuilt binaries install from **[dove.sh](https://dove.sh)** — the canonical,
-project-owned source — every artifact checksummed and **signed with Sigstore**
-(keyless, publicly verifiable). Always install from dove.sh or
-[github.com/boomctl/dove/releases](https://github.com/boomctl/dove/releases);
-never run an artifact you can't verify. _(Signed binaries land with the first
-tagged release.)_
+Every release ships prebuilt archives for macOS, Linux, and Windows from
+**[dove.sh](https://dove.sh)** and
+[github.com/boomctl/dove/releases](https://github.com/boomctl/dove/releases) —
+each **checksummed and signed with Sigstore** (keyless, publicly verifiable with
+`cosign verify-blob`); the Homebrew and Scoop manifests are generated from those
+same checksums. Never run an artifact you can't verify. _(Packages land with the
+first tagged release.)_
 
 ## Acknowledgments
 
