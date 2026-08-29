@@ -480,7 +480,7 @@ fn ensure_gate_secret() -> Result<String> {
     if let Some(g) = &s.gate_secret {
         return Ok(g.clone());
     }
-    let g = crate::crypto::gen_gate_secret();
+    let g = dove_core::crypto::gen_gate_secret();
     s.gate_secret = Some(g.clone());
     s.save()?;
     Ok(g)

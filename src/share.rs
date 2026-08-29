@@ -4,8 +4,9 @@
 
 use crate::config::Config;
 use crate::s3::Store;
-use crate::{crypto, duration as dur, ui};
+use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
+use dove_core::{crypto, duration as dur};
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};

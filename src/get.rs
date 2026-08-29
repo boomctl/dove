@@ -2,8 +2,9 @@
 //! fragment (never sent to any server), fetch the ciphertext, and stream-decrypt
 //! it to a file. Works on any dove share link that carries a `#key`.
 
-use crate::{crypto, ui};
+use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
+use dove_core::crypto;
 use std::fs::File;
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};

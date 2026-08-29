@@ -20,6 +20,7 @@ aes-gcm = "0.10"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+dove-core = { path = "../dove-core" }
 getrandom = "0.2"
 hmac = "0.12"
 pbkdf2 = "0.12"
