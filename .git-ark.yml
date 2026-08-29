@@ -1,5 +1,16 @@
-# git-ark backup policy for this repo. Only these refs are bundled, encrypted
-# client-side, and pushed to the vault. No `github:` block yet — dove is
-# vault-only until it's published to github.com/boomctl/dove.
+# dove's backup + mirror policy. main is bundled, client-side-encrypted, and
+# pushed to the vault; the github block mirrors it to the public boomctl org.
+
+# main earns the durable, client-side-encrypted S3 backup.
 backup_refs:
   - main
+
+# Public mirror to the boomctl OSS org — every push of `main` publishes to and
+# keeps github.com/boomctl/dove in sync.
+github:
+  enabled: true
+  visibility: public
+  owner: boomctl
+  repo: dove
+  branches:
+    - main
