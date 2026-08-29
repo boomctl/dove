@@ -6,9 +6,9 @@
 //! signs with it — never your full account credentials, and with a long-term
 //! key so presigned links get their full requested lifetime.
 
-use crate::config::Config;
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
+use dove_core::config::{Backend, Registry, SelfHostedConfig};
 use std::io::Write;
 use std::process::Command;
 
@@ -176,7 +176,10 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
     }
 
     // 5. Full tier only: the gate (DynamoDB + Lambda + API Gateway + CloudFront).
-    let prior_gate_url = Config::load().ok().and_then(|c| c.gate_url);
+    let prior_gate_url = Registry::load()
+        .ok()
+        .and_then(|r| r.active_self_hosted().ok())
+        .and_then(|c| c.gate_url);
     let (table, gate_url, distribution_id) = if full {
         let infra = provision_full(profile.as_deref(), &account, &bucket, &args.region)?;
         // If a custom domain was already added (`dove domain add`), keep it —
@@ -190,7 +193,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         (None, None, None)
     };
 
-    Config {
+    let cfg = SelfHostedConfig {
         bucket,
         region: args.region.clone(),
         profile,
@@ -198,8 +201,11 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
         table,
         gate_url: gate_url.clone(),
         distribution_id,
-    }
-    .save()?;
+    };
+    let mut reg = Registry::load().unwrap_or_default();
+    reg.upsert(Backend::self_hosted("default", &cfg)?);
+    reg.set_active("default")?;
+    reg.save()?;
 
     match &gate_url {
         Some(url) => ui::done(
@@ -456,7 +462,10 @@ fn provision_full(
     let function_arn = format!("arn:aws:lambda:{region}:{account}:function:{name}");
     let api = crate::apigw::provision_api(profile, region, account, &name, &function_arn)?;
     // Reuse an existing distribution on re-provision (from the saved config).
-    let existing_dist = Config::load().ok().and_then(|c| c.distribution_id);
+    let existing_dist = Registry::load()
+        .ok()
+        .and_then(|r| r.active_self_hosted().ok())
+        .and_then(|c| c.distribution_id);
     let front =
         crate::cloudfront::front_gate(profile, account, &api.host, existing_dist.as_deref())?;
 

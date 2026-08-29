@@ -9,7 +9,6 @@
 mod apigw;
 mod breaker;
 mod cloudfront;
-mod config;
 mod domain;
 mod gate;
 mod gatectl;

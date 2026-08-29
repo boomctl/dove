@@ -3,9 +3,9 @@
 //! (every request fails fast, at no cost — the same lever the cost breaker pulls
 //! automatically on a flood); `enable` removes it; `status` reports which.
 
-use crate::config::Config;
 use crate::ui;
 use anyhow::{bail, Context, Result};
+use dove_core::config::Registry;
 use std::process::Command;
 
 pub fn disable() -> Result<()> {
@@ -75,7 +75,7 @@ pub fn status() -> Result<()> {
 
 /// The gate Lambda's `(profile, function name)` from the config + AWS identity.
 fn gate_function() -> Result<(Option<String>, String)> {
-    let cfg = Config::load()?;
+    let cfg = Registry::load()?.active_self_hosted()?;
     if !cfg.is_full() {
         bail!("this config has no gate — it isn't full tier (`dove provision full`)");
     }

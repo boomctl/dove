@@ -4,15 +4,17 @@
 //! the domain as an alias. DNS that isn't in Route53 (e.g. Cloudflare) means two
 //! records the operator adds by hand; this prints them and waits.
 
-use crate::config::Config;
 use crate::ui;
 use anyhow::{anyhow, bail, Result};
+use dove_core::config::{Backend, Registry};
 use std::process::Command;
 
 const ACM_REGION: &str = "us-east-1";
 
 pub fn run(domain: &str) -> Result<()> {
-    let cfg = Config::load()?;
+    let mut reg = Registry::load()?;
+    let backend_name = reg.active_backend()?.name.clone();
+    let cfg = reg.active_self_hosted()?;
     if !cfg.is_full() {
         bail!("`dove domain add` needs the full tier — run `dove provision full` first");
     }
@@ -59,7 +61,8 @@ pub fn run(domain: &str) -> Result<()> {
     // 5. New shares hand out https://<domain>/… from here on.
     let mut cfg = cfg;
     cfg.gate_url = Some(format!("https://{domain}"));
-    cfg.save()?;
+    reg.upsert(Backend::self_hosted(&backend_name, &cfg)?);
+    reg.save()?;
 
     ui::done(
         "domain added",

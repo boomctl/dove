@@ -2,9 +2,9 @@
 //! presigned link. The terminal echo of the marketing mock: a dotted upload
 //! bar, the size, the URL, and a quiet "expires in …" line.
 
-use crate::config::Config;
 use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
+use dove_core::config::{Registry, SelfHostedConfig};
 use dove_core::s3::Store;
 use dove_core::{crypto, duration as dur};
 use std::fs::File;
@@ -26,7 +26,7 @@ pub fn run(
 ) -> Result<()> {
     let ttl = dur::parse(expires)?;
     // Fail fast if not provisioned, before we spend time zipping/encrypting.
-    let cfg = Config::load()?;
+    let cfg = Registry::load()?.active_self_hosted()?;
     if pin.is_some() && !cfg.is_full() {
         bail!(
             "--pin is a full-tier feature: it's checked at the gate, which the simple tier \
@@ -110,7 +110,7 @@ pub fn run(
 /// the server sees neither the content nor the real filename.
 #[allow(clippy::too_many_arguments)]
 fn share_full(
-    cfg: &Config,
+    cfg: &SelfHostedConfig,
     store: &Store,
     source: &Path,
     name: &str,
@@ -237,7 +237,7 @@ fn gen_pin() -> String {
 /// Write the share's policy row to DynamoDB via the AWS CLI (operator profile).
 #[allow(clippy::too_many_arguments)]
 fn put_policy_item(
-    cfg: &Config,
+    cfg: &SelfHostedConfig,
     id: &str,
     s3_key: &str,
     downloads: u32,
@@ -375,7 +375,7 @@ fn add_tree<W: Write + Seek>(
 /// id only: their filenames are end-to-end encrypted in the link, so the server
 /// (and therefore `ls`) genuinely doesn't have them.
 pub fn list() -> Result<()> {
-    let cfg = Config::load()?;
+    let cfg = Registry::load()?.active_self_hosted()?;
     let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
     let keys = store.list("")?;
     if keys.is_empty() {
@@ -393,7 +393,7 @@ pub fn list() -> Result<()> {
 /// been reaped by the lifecycle rule anyway). Handles both name-free full-tier
 /// keys (`<id>`) and simple-tier keys (`<id>/<name>`).
 pub fn revoke(id: &str) -> Result<()> {
-    let cfg = Config::load()?;
+    let cfg = Registry::load()?.active_self_hosted()?;
     let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
     let keys = store.list(id)?;
     let key = keys
@@ -407,7 +407,7 @@ pub fn revoke(id: &str) -> Result<()> {
 
 /// `dove status` — what's provisioned, and whether the bucket is reachable.
 pub fn status() -> Result<()> {
-    let cfg = Config::load()?;
+    let cfg = Registry::load()?.active_self_hosted()?;
     println!("  {} {}", ui::dim("bucket "), cfg.bucket);
     println!("  {} {}", ui::dim("region "), cfg.region);
     if let Some(p) = &cfg.profile {
