@@ -15,19 +15,13 @@ name = "dove"
 path = "src/main.rs"
 
 [dependencies]
-# Added as the implementation lands, per docs/designs/dove-v1.md.
-aes-gcm = "0.10"
+# Everything else routes through dove-core; the CLI only reaches directly for
+# arg parsing, error context, randomness (temp names), and zip (directory
+# shares).
 anyhow = "1"
-base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dove-core = { path = "../dove-core", version = "0.1.0" }
 getrandom = "0.2"
-hmac = "0.12"
-pbkdf2 = "0.12"
-sha2 = "0.10"
-serde_json = "1"
-rusty-s3 = "0.10"
-ureq = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

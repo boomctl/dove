@@ -385,18 +385,10 @@ dependencies = [
 name = "dove-cli"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
- "base64 0.22.1",
  "clap",
  "dove-core",
  "getrandom",
- "hmac 0.12.1",
- "pbkdf2",
- "rusty-s3",
- "serde_json",
- "sha2 0.10.9",
- "ureq",
  "zip",
 ]
 
