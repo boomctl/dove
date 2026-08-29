@@ -29,13 +29,12 @@ pub fn run(url: &str, out: Option<&Path>, pin: Option<&str>) -> Result<()> {
     }
     let fetched = result?;
 
-    // Trust: show who the file is from before the "downloaded" banner.
-    if let Some(from) = &fetched.from {
-        eprintln!("  {} {}", ui::dim("from"), ui::bold(from));
-        if let Some(msg) = &fetched.message {
-            eprintln!("       {msg}");
-        }
-    }
+    // Trust (who it's from, and their message) was already reported via
+    // `progress.field(...)` — inside `SelfHosted::get`, *before* the
+    // download started, so the recipient can decide whether to pull the file
+    // at all. `fetched.from`/`.message` are still populated here (harmless —
+    // available for a caller that isn't rendering through `Progress`), but
+    // the CLI doesn't print them a second time.
     ui::done("downloaded", &format!("→ {}", fetched.path.display()));
     Ok(())
 }

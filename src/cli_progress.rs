@@ -54,6 +54,11 @@ impl Progress for CliProgress {
     }
 
     fn bytes(&self, uploaded: u64, total: u64) {
+        // A missing/unparseable Content-Length reports `total == 0`; the
+        // original always sized the bar with `total.max(1)` so a transfer of
+        // unknown size still renders (rather than reading as "already done"
+        // on the very first byte).
+        let total = total.max(1);
         let mut bar = self.bar.borrow_mut();
         if uploaded >= total {
             if let Some(b) = bar.take() {
