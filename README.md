@@ -15,10 +15,8 @@ If git-ark is a **write-only vault** — encrypt *to you*, lock everything down 
 dove is git-ark turned inside out: encrypt *to a link*, hand out exactly as much
 access as you allow, then forget.
 
-> **Status: designed in the open, not yet built.** The full v1 design —
-> architecture, encryption, threat model — is written up first, in
-> [docs/designs/dove-v1.md](docs/designs/dove-v1.md). This repo is the scaffold;
-> implementation follows that spec.
+The full v1 design — architecture, encryption, threat model — is written up in
+[docs/designs/dove-v1.md](docs/designs/dove-v1.md).
 
 ## Two tiers
 
@@ -32,6 +30,34 @@ access as you allow, then forget.
   while being structurally unable to read a byte of your file. Optional custom
   domain.
 
+## Quickstart
+
+Stand up the simple tier once — a private, auto-expiring bucket in **your own**
+AWS account (it asks which profile, and derives the rest):
+
+```sh
+dove provision simple
+dove share report.pdf --expires 3d     # uploads, prints a self-deleting link
+```
+
+For the encrypted, download-limited full tier — a policy gate on your account,
+optionally behind your own subdomain:
+
+```sh
+dove provision full
+dove domain add share.example.com               # optional custom domain
+
+dove share invoice.pdf --encrypt --downloads 1 --pin --from "Ada"
+#  → a short link (constant length, whatever the message). The key rides its
+#    #fragment and never reaches a server; the PIN is checked at the gate and
+#    folded into the key. Open it in a browser, or:  dove get <link> --pin 4917
+```
+
+Everyday commands: `dove ls` (what's live), `dove revoke <id>` (kill a link
+early), `dove status` (what's provisioned), and `dove gate disable|enable` — a
+manual panic switch that takes the gate offline at no cost (the built-in cost
+breaker pulls the same lever automatically if traffic ever floods it).
+
 ## Security model (short version)
 
 The core guarantee: **the infrastructure that stores and gates access to a file
@@ -43,13 +69,20 @@ enforce *how many times / how long* — never *what*. See
 
 ## Install
 
-dove installs from **[dove.sh](https://dove.sh)** — the canonical, project-owned
-source. Release binaries are checksummed and **signed with Sigstore** (keyless,
-publicly verifiable). Always install from dove.sh or
-[github.com/boomctl/dove](https://github.com/boomctl/dove/releases); never run an
-artifact you can't verify.
+**From source** — needs [Rust](https://rustup.rs) and the
+[AWS CLI](https://aws.amazon.com/cli/) (provisioning shells out to it):
 
-_(Install commands land with the first release.)_
+```sh
+git clone https://github.com/boomctl/dove && cd dove
+cargo install --path .
+```
+
+Prebuilt binaries install from **[dove.sh](https://dove.sh)** — the canonical,
+project-owned source — every artifact checksummed and **signed with Sigstore**
+(keyless, publicly verifiable). Always install from dove.sh or
+[github.com/boomctl/dove/releases](https://github.com/boomctl/dove/releases);
+never run an artifact you can't verify. _(Signed binaries land with the first
+tagged release.)_
 
 ## Acknowledgments
 
