@@ -4,6 +4,27 @@ All notable changes to `dove` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-29
+
+Request files from other people, and a library split.
+
+### Added — request a file
+- `dove request "<what you need>" [--from --message --pin --expires --uploads]`
+  mints a PIN-gated link you send to someone else. They open it, see who's
+  asking and why, pick a file, and it is **encrypted on their device** before a
+  single byte is uploaded — the gate never sees the key, the filename, or the
+  content. Only you can decrypt what arrives. It is `share` run backwards.
+- `dove requests` lists your open requests and their live state
+  (waiting / received / failed with a reason); `dove requests get <id>`
+  downloads the upload and decrypts it under its real filename.
+
+### Changed
+- The CLI is now a thin shim over the new [`dove-core`](https://crates.io/crates/dove-core)
+  library, which holds the crypto, the S3/gate transfer, provisioning, and the
+  backend registry. Behavior is unchanged; the split lets other front-ends
+  (a desktop app) drive the same audited core. `cargo install dove-cli` still
+  installs the `dove` binary.
+
 ## [0.1.0] - 2026-08-28
 
 The first working version — both tiers, end to end.
