@@ -438,6 +438,11 @@ fn provision_full(
     let existing_dist = Config::load().ok().and_then(|c| c.distribution_id);
     let front = crate::cloudfront::front_gate(profile, &api.host, existing_dist.as_deref())?;
 
+    // Cost circuit-breaker: a flood auto-disables the gate before it can run up a
+    // bill. A public endpoint on the operator's account should never exist without
+    // this backstop.
+    crate::breaker::provision_breaker(profile, region, account, &name)?;
+
     Ok(FullInfra {
         table,
         gate_url: format!("https://{}", front.domain),

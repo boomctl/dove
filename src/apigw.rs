@@ -28,6 +28,24 @@ pub fn provision_api(
         }
         create_api(profile, region, account, name, function_arn)
     })?;
+    // A native rate cap on the stage — the first, free line of defense against a
+    // flood (keeps a burst from running up cost before the breaker even fires).
+    // Generous for real use; a knob for anyone who expects more traffic.
+    ui::step("api throttle", || {
+        aws_ok(
+            profile,
+            &[
+                "apigatewayv2",
+                "update-stage",
+                "--api-id",
+                &id,
+                "--stage-name",
+                "$default",
+                "--default-route-settings",
+                "ThrottlingBurstLimit=50,ThrottlingRateLimit=25",
+            ],
+        )
+    })?;
     Ok(Api {
         host: api_host(&id, region),
     })

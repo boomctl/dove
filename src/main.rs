@@ -7,6 +7,7 @@
 //! https://dove.sh
 
 mod apigw;
+mod breaker;
 mod cloudfront;
 mod config;
 mod crypto;
