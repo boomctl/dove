@@ -66,7 +66,7 @@ jobs:
           # boomctl formulae. This is also what gets checksummed and signed.
           cp "target/${{ matrix.target }}/release/dove${{ matrix.ext }}" \
              "dist/dove-${{ matrix.target }}${{ matrix.ext }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dove-${{ matrix.target }}
           path: dist/*
