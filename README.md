@@ -90,7 +90,7 @@ git clone https://github.com/boomctl/dove && cd dove
 cargo install --path .
 ```
 
-Every release ships prebuilt archives for macOS, Linux, and Windows from
+Every release ships prebuilt binaries for macOS, Linux, and Windows from
 **[dove.sh](https://dove.sh)** and
 [github.com/boomctl/dove/releases](https://github.com/boomctl/dove/releases) —
 each **checksummed and signed with Sigstore** (keyless, publicly verifiable with

@@ -57,19 +57,15 @@ jobs:
       - name: build (native)
         if: ${{ !matrix.cross }}
         run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: package archive
+      - name: stage binary
         shell: bash
         run: |
           mkdir -p dist
-          bin="dove${{ matrix.ext }}"
-          cp "target/${{ matrix.target }}/release/$bin" "$bin"
-          # An archive holding a single `dove`/`dove.exe` at its root — the shape
-          # Homebrew (.tar.gz) and Scoop (.zip) expect, and what gets signed.
-          if [ "${{ matrix.ext }}" = ".exe" ]; then
-            7z a "dist/dove-${{ matrix.target }}.zip" "$bin" >/dev/null
-          else
-            tar czf "dist/dove-${{ matrix.target }}.tar.gz" "$bin"
-          fi
+          # Ship the bare binary (named per target): Homebrew installs it directly
+          # and Scoop fetches the .exe with a rename fragment — matching the sibling
+          # boomctl formulae. This is also what gets checksummed and signed.
+          cp "target/${{ matrix.target }}/release/dove${{ matrix.ext }}" \
+             "dist/dove-${{ matrix.target }}${{ matrix.ext }}"
       - uses: actions/upload-artifact@v4
         with:
           name: dove-${{ matrix.target }}
