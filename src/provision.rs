@@ -169,6 +169,7 @@ pub fn run(args: &ProvisionArgs) -> Result<()> {
             crate::secrets::Secrets {
                 access_key_id: id,
                 secret_access_key: secret,
+                gate_secret: None,
             }
             .save()
         })?;
@@ -321,12 +322,16 @@ fn provision_full(
         )
     })?;
 
+    // The gate secret — the HMAC key that mints/verifies unforgeable share ids.
+    // Stable across re-provision (generated once, kept in secrets.toml).
+    let gate_secret = ensure_gate_secret()?;
+
     // The gate Lambda. A freshly-created role isn't assumable for a few seconds,
     // so retry create-function on that specific error.
     let zip = temp_path("zip");
     crate::gate::write_deployment_zip(&zip)?;
     let zip_arg = format!("fileb://{}", zip.display());
-    let env = format!("Variables={{BUCKET={bucket},TABLE={table}}}");
+    let env = format!("Variables={{BUCKET={bucket},TABLE={table},GATE_SECRET={gate_secret}}}");
     let lambda_result = ui::step("gate Lambda", || {
         aws_retry(
             profile,
@@ -382,7 +387,33 @@ fn provision_full(
             "cannot be performed at this time",
             10,
         )?;
-        // Let the code update settle before the URL/permission steps touch it.
+        // Let the code update settle before the config update.
+        let _ = aws(
+            profile,
+            &[
+                "lambda",
+                "wait",
+                "function-updated-v2",
+                "--function-name",
+                &name,
+            ],
+        );
+        // Set the env (BUCKET/TABLE/GATE_SECRET) — a fresh create already has it,
+        // but a re-provision of an existing function needs it applied here.
+        aws_retry(
+            profile,
+            &[
+                "lambda",
+                "update-function-configuration",
+                "--function-name",
+                &name,
+                "--environment",
+                &env,
+            ],
+            &[],
+            "cannot be performed at this time",
+            10,
+        )?;
         let _ = aws(
             profile,
             &[
@@ -412,6 +443,20 @@ fn provision_full(
         gate_url: format!("https://{}", front.domain),
         distribution_id: Some(front.distribution_id),
     })
+}
+
+/// Load the gate secret, generating and persisting one the first time. Kept in
+/// secrets.toml so `share` can mint ids and so it's stable across re-provision
+/// (regenerating it would invalidate every outstanding link).
+fn ensure_gate_secret() -> Result<String> {
+    let mut s = crate::secrets::Secrets::load()?;
+    if let Some(g) = &s.gate_secret {
+        return Ok(g.clone());
+    }
+    let g = crate::crypto::gen_gate_secret();
+    s.gate_secret = Some(g.clone());
+    s.save()?;
+    Ok(g)
 }
 
 /// Trust policy letting Lambda assume the gate's role.

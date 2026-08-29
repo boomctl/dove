@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 pub struct Secrets {
     pub access_key_id: String,
     pub secret_access_key: String,
+    /// The full-tier gate secret (hex): the HMAC key that mints unforgeable share
+    /// ids. `share` reads it; the gate Lambda holds the same value to verify.
+    #[serde(default)]
+    pub gate_secret: Option<String>,
 }
 
 impl Secrets {
@@ -70,6 +74,7 @@ mod tests {
         let s = Secrets {
             access_key_id: "AKIAEXAMPLE".into(),
             secret_access_key: "shhh".into(),
+            gate_secret: Some("deadbeef".into()),
         };
         let text = toml::to_string(&s).unwrap();
         assert_eq!(toml::from_str::<Secrets>(&text).unwrap(), s);

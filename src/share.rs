@@ -118,7 +118,12 @@ fn share_full(
     message: Option<String>,
     zip_temp: Option<PathBuf>,
 ) -> Result<()> {
-    let share_id = random_id();
+    // A MAC'd share id: the gate rejects any id it didn't mint before touching
+    // the database, so forged / random-id floods die at a cheap check.
+    let gate_secret = crate::secrets::Secrets::load()?
+        .gate_secret
+        .ok_or_else(|| anyhow!("no gate secret in secrets.toml — re-run `dove provision full`"))?;
+    let share_id = crypto::new_share_id(&gate_secret)?;
 
     // The fragment always carries a random secret. Without a PIN it *is* the
     // content key. With a PIN, the content key is PBKDF2(PIN, secret) — the PIN
@@ -287,27 +292,6 @@ fn now_epoch() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// A 16-hex-char share id — the gate access token in the URL. Unguessable, so a
-/// share's download budget can't be exhausted by guessing ids.
-fn random_id() -> String {
-    let mut b = [0u8; 8];
-    getrandom::getrandom(&mut b).expect("OS RNG unavailable");
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-#[cfg(test)]
-mod full_tests {
-    use super::*;
-
-    #[test]
-    fn random_id_is_16_hex_and_unique() {
-        let a = random_id();
-        assert_eq!(a.len(), 16);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, random_id());
-    }
 }
 
 /// Resolve what to upload and under what name: a file as-is, or a directory

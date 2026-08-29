@@ -299,6 +299,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "getrandom",
+ "hmac",
  "pbkdf2",
  "rusty-s3",
  "serde",

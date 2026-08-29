@@ -124,6 +124,49 @@ pub fn decrypt_meta(secret: &[u8; 32], blob_b64: &str) -> Result<Vec<u8>> {
         .map_err(|_| anyhow!("metadata decryption failed"))
 }
 
+/// A fresh 32-byte gate secret, hex-encoded — the key for MAC'd share ids. Stored
+/// in `secrets.toml` (to mint) and in the gate Lambda's env (to verify).
+pub fn gen_gate_secret() -> String {
+    let mut b = [0u8; 32];
+    getrandom::getrandom(&mut b).expect("OS RNG unavailable");
+    hex_lower(&b)
+}
+
+/// Mint an unforgeable share id: `hex(nonce(8) ‖ HMAC-SHA256(gate_secret,
+/// nonce)[:8])`. The 64-bit MAC means the gate can reject any id it didn't mint
+/// with a compute-only check, *before* touching the database — so forged /
+/// random-id floods die cheap. The gate (Python) verifies with the same
+/// construction.
+pub fn mint_share_id(gate_secret: &[u8], nonce: &[u8; 8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut m =
+        <Hmac<sha2::Sha256> as Mac>::new_from_slice(gate_secret).expect("HMAC accepts any key len");
+    m.update(nonce);
+    let tag = m.finalize().into_bytes();
+    let mut raw = nonce.to_vec();
+    raw.extend_from_slice(&tag[..8]);
+    hex_lower(&raw)
+}
+
+/// A fresh MAC'd share id from a hex-encoded gate secret.
+pub fn new_share_id(gate_secret_hex: &str) -> Result<String> {
+    let secret = hex_decode(gate_secret_hex).ok_or_else(|| anyhow!("invalid gate secret"))?;
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).expect("OS RNG unavailable");
+    Ok(mint_share_id(&secret, &nonce))
+}
+
+/// Decode a lowercase hex string to bytes.
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
 fn hex_lower(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
@@ -349,6 +392,42 @@ mod tests {
             "plaintext": String::from_utf8_lossy(plaintext),
         });
         let _ = std::fs::write("/tmp/dove-meta-fixture.json", fixture.to_string());
+    }
+
+    #[test]
+    fn share_id_is_maced_and_deterministic() {
+        let secret = crypto_secret();
+        let nonce = [0x11u8; 8];
+        let id = mint_share_id(&secret, &nonce);
+        assert_eq!(id.len(), 32); // 8-byte nonce + 8-byte mac, hex
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic; the first 8 bytes are the nonce.
+        assert_eq!(mint_share_id(&secret, &nonce), id);
+        assert_eq!(&id[..16], "1111111111111111");
+        // A different secret produces a different mac (same nonce prefix).
+        let other = mint_share_id(&[9u8; 32], &nonce);
+        assert_eq!(&other[..16], "1111111111111111");
+        assert_ne!(&other[16..], &id[16..]);
+        // Emit a fixture so the Python gate's verifier can be cross-checked.
+        let fixture = serde_json::json!({
+            "secret_hex": hex_lower(&secret), "nonce_hex": hex_lower(&nonce), "id": id,
+        });
+        let _ = std::fs::write("/tmp/dove-macid-fixture.json", fixture.to_string());
+    }
+
+    fn crypto_secret() -> [u8; 32] {
+        let mut s = [0u8; 32];
+        for (i, b) in s.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        s
+    }
+
+    #[test]
+    fn hex_decode_round_trips() {
+        assert_eq!(hex_decode("00ff10").unwrap(), vec![0x00, 0xff, 0x10]);
+        assert_eq!(hex_decode("abc"), None); // odd length
+        assert_eq!(hex_decode("zz"), None); // non-hex
     }
 
     #[test]

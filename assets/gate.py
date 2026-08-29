@@ -14,6 +14,7 @@ and HTTP clients never send. Environment: BUCKET, TABLE.
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -23,6 +24,9 @@ import boto3
 
 BUCKET = os.environ["BUCKET"]
 TABLE = os.environ["TABLE"]
+# HMAC key for share ids. Present once provisioned; when absent (not yet
+# configured) id verification is skipped so the gate still serves.
+GATE_SECRET = bytes.fromhex(os.environ["GATE_SECRET"]) if os.environ.get("GATE_SECRET") else None
 
 # Wrong-PIN guesses allowed before the share locks. Small, because the gate
 # checks online — a handful of tries against a 6-digit PIN is negligible odds,
@@ -50,6 +54,22 @@ def _origin(event):
     return f"https://{dom}" if dom else ""
 
 
+def _valid_id(share_id):
+    """True if the id carries a MAC this gate minted: hex(nonce(8) ‖
+    HMAC-SHA256(GATE_SECRET, nonce)[:8]). Constant-time; no DB access."""
+    if GATE_SECRET is None:
+        return True  # verification not configured — don't lock the gate
+    if len(share_id) != 32:
+        return False
+    try:
+        raw = bytes.fromhex(share_id)
+    except ValueError:
+        return False
+    nonce, mac = raw[:8], raw[8:]
+    expected = hmac.new(GATE_SECRET, nonce, hashlib.sha256).digest()[:8]
+    return hmac.compare_digest(mac, expected)
+
+
 def handler(event, _context):
     raw = event.get("rawPath", "")
     if raw == "/og.png":
@@ -64,6 +84,12 @@ def handler(event, _context):
     if len(parts) < 2:
         return _resp(404, "not a dove share link")
     route, share_id = parts[0], parts[1]
+
+    # Verify the id's MAC before any DynamoDB/S3 touch — a forged or random id is
+    # rejected here, for the cost of a hash. (The page /d is served regardless;
+    # it's static and cheap, and its /meta call is where the real work is gated.)
+    if route in ("meta", "verify", "dl") and not _valid_id(share_id):
+        return _resp(403, "not a dove share link")
 
     if route == "d":
         # The decryptor page. No decrement — opening a link (or an unfurler

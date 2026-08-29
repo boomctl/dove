@@ -21,6 +21,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.2"
+hmac = "0.12"
 pbkdf2 = "0.12"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
