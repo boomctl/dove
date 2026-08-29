@@ -54,6 +54,12 @@ def handler(event, _context):
     if route == "meta":
         return _meta(share_id)
 
+    if route == "verify":
+        # PIN pre-check for the browser's two-step flow: verify + rate-limit
+        # WITHOUT spending a download. The download happens on the explicit click.
+        params = event.get("queryStringParameters") or {}
+        return _verify(share_id, params.get("pin"))
+
     if route == "dl":
         params = event.get("queryStringParameters") or {}
         return _download(share_id, params.get("pin"))
@@ -124,6 +130,18 @@ def _pin_gate(share_id, item, pin):
         json.dumps({"error": error, "attempts_remaining": remaining}),
         "application/json",
     )
+
+
+def _verify(share_id, pin):
+    now = int(time.time())
+    item = _ddb.get_item(TableName=TABLE, Key={"id": {"S": share_id}}).get("Item")
+    if not item or int(item["expires_at"]["N"]) <= now or int(item["downloads_remaining"]["N"]) <= 0:
+        return _resp(410, json.dumps({"error": "gone"}), "application/json")
+    # Same PIN gate as the download (verify + rate-limit + lock), but no decrement.
+    gate = _pin_gate(share_id, item, pin)
+    if gate is not None:
+        return gate
+    return _resp(200, json.dumps({"ok": True}), "application/json")
 
 
 def _download(share_id, pin):
