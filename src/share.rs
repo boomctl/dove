@@ -12,7 +12,7 @@ use crate::ui;
 use anyhow::{anyhow, bail, Context, Result};
 use dove_core::config::Registry;
 use dove_core::s3::Store;
-use dove_core::transfer::{ShareRequest, Transfer};
+use dove_core::transfer::{ShareInfo, ShareRequest, Transfer};
 use dove_core::{backend::SelfHosted, duration as dur};
 use std::fs::File;
 use std::io::{Seek, Write};
@@ -189,34 +189,29 @@ fn add_tree<W: Write + Seek>(
 
 /// `dove ls` — the shares currently in the bucket. Full-tier shares are listed by
 /// id only: their filenames are end-to-end encrypted in the link, so the server
-/// (and therefore `ls`) genuinely doesn't have them.
+/// (and therefore `ls`) genuinely doesn't have them. The listing itself (bucket +
+/// local-ledger lookup) lives in `dove_core::backend::SelfHosted::list`; this just
+/// renders it.
 pub fn list() -> Result<()> {
-    let cfg = Registry::load()?.active_self_hosted()?;
-    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
-    let keys = store.list("")?;
-    if keys.is_empty() {
+    let backend = SelfHosted::from_backend(Registry::load()?.active_backend()?)?;
+    let shares = backend.list()?;
+    if shares.is_empty() {
         eprintln!("no shares yet — `dove share <file>` to make one");
         return Ok(());
     }
-    let names = dove_core::ledger::names(); // local id → filename map
-    for key in keys {
-        println!("{}", share_row(&key, &names));
+    for info in &shares {
+        println!("{}", share_row(info));
     }
     Ok(())
 }
 
 /// `dove revoke <id>` — delete a share early, so its link 404s (it would have
 /// been reaped by the lifecycle rule anyway). Handles both name-free full-tier
-/// keys (`<id>`) and simple-tier keys (`<id>/<name>`).
+/// keys (`<id>`) and simple-tier keys (`<id>/<name>`) — resolved by
+/// `dove_core::backend::SelfHosted::revoke`.
 pub fn revoke(id: &str) -> Result<()> {
-    let cfg = Registry::load()?.active_self_hosted()?;
-    let store = Store::new(&cfg.bucket, &cfg.region, cfg.endpoint.as_deref())?;
-    let keys = store.list(id)?;
-    let key = keys
-        .first()
-        .ok_or_else(|| anyhow!("no share with id {id}"))?;
-    store.delete_object(key)?;
-    let _ = dove_core::ledger::remove(id);
+    let backend = SelfHosted::from_backend(Registry::load()?.active_backend()?)?;
+    backend.revoke(id)?;
     println!("revoked {id} — the link now 404s");
     Ok(())
 }
@@ -236,16 +231,14 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// One `ls` row: filename then the dim share id. The filename comes from the key
-/// itself for simple-tier shares (`<id>/<name>`), or from the local ledger for
-/// full-tier name-free keys (`<id>`). Pure, so it's testable.
-fn share_row(key: &str, names: &std::collections::HashMap<String, String>) -> String {
-    match key.split_once('/') {
-        Some((id, name)) => format!("  {}  {}", name, ui::dim(id)),
-        None => match names.get(key) {
-            Some(name) => format!("  {}  {}", name, ui::dim(key)),
-            None => format!("  {}  {}", ui::dim("(encrypted name)"), ui::dim(key)),
-        },
+/// One `ls` row: filename then the dim share id. `dove_core`'s `list()` has
+/// already resolved the filename (from the key itself for simple-tier shares,
+/// or the local ledger for full-tier name-free ones) — this just renders it.
+/// Pure, so it's testable.
+fn share_row(info: &ShareInfo) -> String {
+    match &info.filename {
+        Some(name) => format!("  {}  {}", name, ui::dim(&info.id)),
+        None => format!("  {}  {}", ui::dim("(encrypted name)"), ui::dim(&info.id)),
     }
 }
 
@@ -255,22 +248,23 @@ mod tests {
 
     #[test]
     fn share_row_shows_name_and_id() {
-        use std::collections::HashMap;
-        // simple-tier key: filename comes from the key itself
-        let row = share_row("ab12cd34/report.pdf", &HashMap::new());
+        // a known filename (simple-tier key, or a full-tier id the local
+        // ledger resolved): name then the id.
+        let row = share_row(&ShareInfo {
+            id: "ab12cd34".into(),
+            filename: Some("report.pdf".into()),
+            expires_at: 0,
+        });
         assert!(
             row.contains("report.pdf") && row.contains("ab12cd34"),
             "{row}"
         );
-        // full-tier name-free key: filename comes from the local ledger
-        let names = HashMap::from([("890ad620f2c0b442".to_string(), "vault.txt".to_string())]);
-        let row = share_row("890ad620f2c0b442", &names);
-        assert!(
-            row.contains("vault.txt") && row.contains("890ad620f2c0b442"),
-            "{row}"
-        );
-        // unknown id → placeholder, still shows the id
-        let row = share_row("deadbeefdeadbeef", &HashMap::new());
+        // unknown full-tier id (no ledger entry) → placeholder, still shows the id
+        let row = share_row(&ShareInfo {
+            id: "deadbeefdeadbeef".into(),
+            filename: None,
+            expires_at: 0,
+        });
         assert!(
             row.contains("encrypted name") && row.contains("deadbeef"),
             "{row}"
