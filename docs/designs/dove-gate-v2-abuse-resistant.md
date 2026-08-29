@@ -5,7 +5,7 @@
 in *their own* AWS account, on *their own* bill. Two things forced this redesign:
 
 1. **BYOA reality.** dove runs in an account it does not control and cannot see
-   the guardrails of. A real account (the account) was found to block *every*
+   the guardrails of. A real account was found to block *every*
    non-IAM-identity path to a Lambda Function URL — anonymous **and** the
    CloudFront-OAC service principal. Function URLs are the newest, most-restricted
    way to expose a Lambda and therefore the worst default for BYOA.
@@ -272,7 +272,7 @@ verdict, not a link that silently 403s.
    articulates: *"Everything was created, but your account is blocking anonymous
    access to the gate — dove needs the gate reachable without credentials, and
    this account won't allow it. This is an account guardrail, not a dove error.
-   Options: …"* — the message that would have saved the entire the account detour.
+   Options: …"* — the message that would have saved the entire detour.
 3. **Actionable failures throughout** — every gate-provisioning error names the
    permission or guardrail involved, never a bare AWS error code.
 
