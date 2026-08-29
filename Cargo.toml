@@ -20,14 +20,12 @@ aes-gcm = "0.10"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
-dove-core = { path = "../dove-core" }
+dove-core = { path = "../dove-core", version = "0.1.0" }
 getrandom = "0.2"
 hmac = "0.12"
 pbkdf2 = "0.12"
-serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 serde_json = "1"
-toml = "0.8"
 rusty-s3 = "0.10"
 ureq = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -54,3 +54,38 @@ release workflow — no `workflow_dispatch`, no manual upload.
 
   This is the shared `boomctl` tap/bucket, so `brew install boomctl/tap/dove` and
   `scoop install dove` work the moment the push lands.
+
+## Publishing to crates.io
+
+The binary release above (GitHub Releases + Homebrew/Scoop taps) is independent
+of crates.io and doesn't require these steps. Do this only when publishing the
+library or making `cargo install dove-cli` work.
+
+`dove-cli` (this repo) depends on `dove-core` (`/Users/phil/Code/dove-core`,
+its own repo). While the two are co-developed, that's a `path` dependency —
+`cargo publish` refuses to publish a crate whose dependency has no version
+requirement, and crates.io won't accept a path in a published `Cargo.toml` at
+all. `dove-cli`'s `Cargo.toml` therefore carries **both**:
+
+```toml
+dove-core = { path = "../dove-core", version = "0.1.0" }
+```
+
+`cargo build` resolves the `path` locally; `cargo publish` strips the `path`
+key and ships only the `version` requirement, provided that requirement is
+satisfied by a version of `dove-core` that's actually on crates.io. Publish
+order matters:
+
+1. **Publish `dove-core` first**, on its own version line (`cargo publish` from
+   `../dove-core`).
+2. **Bump the version requirement** in `dove-cli`'s `Cargo.toml` if `dove-core`
+   crossed a semver boundary the existing requirement doesn't cover (a patch
+   release under the same `0.y` line usually needs no change; a `0.y` minor
+   bump does, per Cargo's `0.y.z` semver rules).
+3. **Publish `dove-cli`** (`cargo publish` from this repo). Cargo will fail
+   loudly at publish time if the `dove-core` version on crates.io doesn't
+   satisfy the requirement — that's the signal to go back to step 2.
+
+`cargo deny check` (`bans.wildcards = "deny"`) enforces that the dependency
+always carries a version requirement, not just a bare path, so this ordering
+constraint can't silently regress.

@@ -84,9 +84,12 @@ irm https://raw.githubusercontent.com/boomctl/dove/main/install.ps1 | iex
 ```
 
 **From source** — needs [Rust](https://rustup.rs) and the
-[AWS CLI](https://aws.amazon.com/cli/) (provisioning shells out to it):
+[AWS CLI](https://aws.amazon.com/cli/) (provisioning shells out to it). `dove-cli`
+depends on the sibling [dove-core](https://github.com/boomctl/dove-core) library
+as a path dependency while the two are co-developed, so clone both, side by side:
 
 ```sh
+git clone https://github.com/boomctl/dove-core
 git clone https://github.com/boomctl/dove && cd dove
 cargo install --path .
 ```
