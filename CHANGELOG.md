@@ -64,6 +64,7 @@ The first working version — both tiers, end to end.
 - Prebuilt release binaries for macOS, Linux, and Windows — built by the
   tag-triggered workflow, each checksummed and Sigstore-signed.
 - **Homebrew** (`brew install boomctl/tap/dove`) and **Scoop**
-  (`scoop install dove`): the release workflow renders both manifests from the
-  release checksums (`packaging/render.sh`) and pushes them to the shared
-  `boomctl` tap/bucket on every tag. See [`packaging/README.md`](packaging/README.md).
+  (`scoop install dove`): `scripts/render-tap-files.sh` renders both manifests
+  from the release checksums and publishes them to the shared `boomctl`
+  tap/bucket through the git-ark vault, in one command. See
+  [`docs/RELEASING.md`](docs/RELEASING.md).
